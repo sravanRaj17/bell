@@ -637,7 +637,7 @@ def run_high_dimensional_bb84_protocol(key_length=256, dimension=4, backend=None
             
     error_count = 0
     for idx in sample_indices:
-      if sifted_key_alice[idx] != sifted_key_bob[idx]:   # âœ… fixed
+      if sifted_key_alice[idx] != sifted_key_bob[idx]:   #fixed
         error_count += 1
             
     if use_auth:
@@ -1720,7 +1720,7 @@ st.markdown("""
     }
     
     .quantum-payment-success::after {
-        content: 'âš›ï¸';
+        content: '⚛️';
         position: absolute;
         left: 50%;
         top: 50%;
@@ -1987,7 +1987,7 @@ if "logged_in_user" not in st.session_state:
                     password_hash = hashlib.sha256(password_input.encode()).hexdigest()
                     if password_hash == st.session_state.users[found_key].get("password_hash", ""):
                         st.session_state.logged_in_user = found_key
-                        st.success("âœ… Login successful!")
+                        st.success("✅ Login successful!")
                         time.sleep(1)
                         st.rerun()
                     else:
@@ -2295,7 +2295,7 @@ else:
                 # Determine if this was an incoming or outgoing transaction
                 direction = "sent" if tx["sender"] == user_public_key else "received"
                 amount_color = "#ff6b6b" if direction == "sent" else "#43e97b"
-                direction_icon = "â†—ï¸" if direction == "sent" else "â†˜ï¸"
+                direction_icon = "↗️" if direction == "sent" else "↘️"
                 
                 # Get the other party's username if available
                 other_party_key = tx["receiver"] if direction == "sent" else tx["sender"]
@@ -2352,7 +2352,7 @@ else:
         else:
             st.markdown("""
             <div style="text-align: center; padding: 3rem; color: rgba(255,255,255,0.5);">
-                <div style="font-size: 3rem;">ðŸ’¸</div>
+                <div style="font-size: 3rem;">💸</div>
                 <div style="margin-top: 1rem; font-size: 1.2rem;">No transactions yet</div>
                 <div>Start by sending your first quantum transaction!</div>
             </div>
@@ -2383,11 +2383,11 @@ else:
         col1, col2, col3, col4, col5 = st.columns(5)
         
         metrics = [
-            ("ðŸ“¦", "Blocks", len(st.session_state.blockchain)),
-            ("ðŸ”", "Transactions", st.session_state.network_stats["total_transactions"]),
-            ("ðŸ’°", "Volume", f"{st.session_state.network_stats['total_volume']:.1f}"),
-            ("ðŸ”", "Quantum TXs", total_quantum_tx),
-            ("ðŸ“Š", "Avg Q-Dim", f"{avg_quantum_dim:.1f}")
+            ("📦", "Blocks", len(st.session_state.blockchain)),
+            ("🔁", "Transactions", st.session_state.network_stats["total_transactions"]),
+            ("💰", "Volume", f"{st.session_state.network_stats['total_volume']:.1f}"),
+            ("🔐", "Quantum TXs", total_quantum_tx),
+            ("📊", "Avg Q-Dim", f"{avg_quantum_dim:.1f}")
         ]
         
         for col, (icon, label, value) in zip([col1, col2, col3, col4, col5], metrics):
@@ -2630,7 +2630,7 @@ else:
 
     # MARKET TAB
     with tabs[3]:
-        st.markdown("### ðŸ“Š Quantum Market Data")
+        st.markdown("### 📊 Quantum Market Data")
         
         # Initialize market data in session state if not exists
         if "market_data" not in st.session_state:
@@ -2642,7 +2642,7 @@ else:
             }
         
         # Settings for market data
-        with st.expander("âš™ï¸ Market Settings", expanded=False):
+        with st.expander("⚙️ Market Settings", expanded=False):
             col1, col2 = st.columns(2)
             with col1:
                 refresh_interval = st.slider("Refresh Interval (seconds)", 30, 300, 60, 30)
@@ -2657,7 +2657,7 @@ else:
         # Refresh button and status
         col1, col2, col3 = st.columns([2, 1, 1])
         with col1:
-            if st.button("ðŸ”„ Refresh Market Data", use_container_width=True):
+            if st.button("🔄 Refresh Market Data", use_container_width=True):
                 with st.spinner("Fetching latest market data..."):
                     st.session_state.market_data["crypto"] = fetch_crypto_data(crypto_list)
                     st.session_state.market_data["fiat"] = fetch_fiat_rates(base_currency)
@@ -2680,7 +2680,7 @@ else:
         
         # Display market data
         if st.session_state.market_data["crypto"]:
-            st.markdown("#### ðŸ’° Cryptocurrency Prices")
+            st.markdown("#### 💰 Cryptocurrency Prices")
             
             # Create cards for each cryptocurrency
             crypto_cols = st.columns(3)
@@ -2689,7 +2689,7 @@ else:
                 with crypto_cols[col_idx]:
                     change_24h = crypto.get('price_change_percentage_24h', 0)
                     change_color = "#43e97b" if change_24h >= 0 else "#ff6b6b"
-                    change_icon = "ðŸ“ˆ" if change_24h >= 0 else "ðŸ“‰"
+                    change_icon = "📈" if change_24h >= 0 else "📉"
                     
                     st.markdown(f"""
                     <div class="modern-card" style="border-left: 4px solid {change_color};">
@@ -2717,7 +2717,7 @@ else:
         
             # Display historical chart if a crypto is selected
             if "selected_crypto" in st.session_state:
-                st.markdown(f"#### ðŸ“ˆ {st.session_state.selected_crypto_name} Price History")
+                st.markdown(f"#### 📈 {st.session_state.selected_crypto_name} Price History")
                 
                 days_options = {"7 Days": 7, "30 Days": 30, "90 Days": 90}
                 selected_days = st.radio("Time Period", list(days_options.keys()), horizontal=True)
@@ -2760,7 +2760,7 @@ else:
         
         # Display fiat exchange rates
         if st.session_state.market_data["fiat"]:
-            st.markdown("#### ðŸ’± Fiat Exchange Rates")
+            st.markdown("#### 💱 Fiat Exchange Rates")
             
             # Select popular currencies to display
             popular_currencies = ["EUR", "GBP", "JPY", "CAD", "AUD", "CHF", "CNY", "INR"]
@@ -2786,7 +2786,7 @@ else:
                         """, unsafe_allow_html=True)
         
         # Market news section (placeholder)
-        st.markdown("#### ðŸ“° Market News")
+        st.markdown("#### 📰 Market News")
         st.info("""
         QuantumVerse is monitoring global markets for you. 
         In a future update, we'll integrate real-time financial news related to your holdings.
@@ -2840,8 +2840,8 @@ else:
             
             for k, u in st.session_state.users.items():
                 bal = st.session_state.balances.get(u["public_key"], 0)
-                has_key = "âœ…" if st.session_state.quantum_keys.get(k) else "â­•"
-                active = "ðŸŸ¢" if k == logged_in_user else "âšª"
+                has_key = "✅" if st.session_state.quantum_keys.get(k) else "⭕"
+                active = "🟢" if k == logged_in_user else "⚪"
                 
                 st.markdown(f"""
                 <div style="display: flex; justify-content: space-between; align-items: center; 
@@ -2879,9 +2879,9 @@ else:
                             if tx.get("quantum_secured", False) and not verify_signature(tx):
                                 quantum_errors += 1
                     
-                    st.success(f"âœ… Audit Complete: {valid_blocks}/{len(st.session_state.blockchain)} blocks valid")
+                    st.success(f"✅ Audit Complete: {valid_blocks}/{len(st.session_state.blockchain)} blocks valid")
                     if quantum_errors > 0:
-                        st.error(f"âŒ {quantum_errors} quantum transactions failed verification")
+                        st.error(f"❌ {quantum_errors} quantum transactions failed verification")
                     else:
                         st.success(" All quantum transactions verified successfully")
         
@@ -3011,7 +3011,7 @@ else:
                     </div>
                     """, unsafe_allow_html=True)
             else:
-                st.info("ðŸ“­ No transactions in this block")
+                st.info("📭 No transactions in this block")
 
         # Advanced transaction search
         st.markdown("###  Advanced Transaction Search")
@@ -3060,7 +3060,7 @@ else:
         # Display filtered results
         for tx in filtered_txs[-15:]:  # Show most recent 15
             direction = "outgoing" if tx["sender"] == user_public_key else "incoming"
-            direction_icon = "â†—ï¸" if direction == "outgoing" else "â†˜ï¸"
+            direction_icon = "↗️" if direction == "outgoing" else "↘️"
             amount_color = "#ff6b6b" if direction == "outgoing" else "#43e97b"
             
             quantum_info = ""
@@ -3072,14 +3072,14 @@ else:
                 </div>
                 """
             else:
-                quantum_info = '<div style="margin-top: 0.8rem;"><span style="color: #feca57; font-weight: 600;">âš ï¸ Classical Transaction</span></div>'
+                quantum_info = '<div style="margin-top: 0.8rem;"><span style="color: #feca57; font-weight: 600;">⚠️ Classical Transaction</span></div>'
             
             st.markdown(f"""
             <div class="transaction-card">
                 <div style="display: flex; justify-content: space-between; align-items: flex-start;">
                     <div style="flex: 1;">
                         <div style="font-weight: 600; font-size: 1.1rem; margin-bottom: 0.5rem;">
-                            {direction_icon} Block #{tx['block_height']} â€¢ {direction.upper()}
+                            {direction_icon} Block #{tx['block_height']} • {direction.upper()}
                         </div>
                         <div style="color: rgba(255,255,255,0.7; margin-bottom: 0.8rem;">
                             From: {tx['sender'][:12]}...{tx['sender'][-6:]}
@@ -3088,7 +3088,7 @@ else:
                             To: {tx['receiver'][:12]}...{tx['receiver'][-6:]}
                         </div>
                         <div style="font-size: 0.9rem; color: rgba(255,255,255,0.6); margin-bottom: 0.8rem;">
-                            {tx['timestamp'][:19]} â€¢ {tx.get('type', 'transfer').title()}
+                            {tx['timestamp'][:19]} • {tx.get('type', 'transfer').title()}
                         </div>
                         {quantum_info}
                     </div>
@@ -3119,7 +3119,7 @@ else:
                     <div>
                         <div class="metric-label">Authentication</div>
                         <div class="{'status-success' if st.session_state.get('authentication_enabled') else 'status-warning'}">
-                            {'âœ… Enabled' if st.session_state.get('authentication_enabled') else 'âš ï¸ Disabled'}
+                            {'✅ Enabled' if st.session_state.get('authentication_enabled') else '⚠️ Disabled'}
                         </div>
                     </div>
                     <div>
@@ -3135,7 +3135,7 @@ else:
                     <div>
                         <div class="metric-label">Hardware Type</div>
                         <div class="{'status-success' if 'IBM' in st.session_state.last_hardware_used else 'status-warning'}">
-                            {'ðŸ”¬ Real' if 'IBM' in st.session_state.last_hardware_used else 'âš¡ Simulator'}
+                            {'🔬 Real' if 'IBM' in st.session_state.last_hardware_used else '⚡ Simulator'}
                         </div>
                     </div>
                 </div>
@@ -3262,21 +3262,21 @@ else:
             {
                 "timestamp": (datetime.now() - timedelta(minutes=5)).strftime("%H:%M:%S"),
                 "event": "Quantum transaction completed",
-                "status": "âœ… Success",
+                "status": "✅ Success",
                 "dimension": st.session_state.quantum_dimension,
                 "hardware": st.session_state.last_hardware_used
             },
             {
                 "timestamp": (datetime.now() - timedelta(hours=1)).strftime("%H:%M:%S"),
                 "event": "Quantum key generation",
-                "status": "âœ… Success",
+                "status": "✅ Success",
                 "dimension": st.session_state.quantum_dimension,
                 "hardware": st.session_state.last_hardware_used
             },
             {
                 "timestamp": (datetime.now() - timedelta(hours=3)).strftime("%H:%M:%S"),
                 "event": "Security settings updated",
-                "status": "âœ… Success",
+                "status": "✅ Success",
                 "dimension": "N/A",
                 "hardware": "N/A"
             }
@@ -3291,7 +3291,7 @@ else:
                             {event['event']}
                         </div>
                         <div style="color: rgba(255,255,255,0.7);">
-                            {event['timestamp']} â€¢ {event['status']}
+                            {event['timestamp']} • {event['status']}
                         </div>
                     </div>
                     <div style="text-align: right;">
@@ -3317,14 +3317,14 @@ else:
             recommendations.append("Try using real quantum hardware for enhanced security")
         
         if not recommendations:
-            st.success("âœ… Your security configuration is optimal!")
+            st.success("✅ Your security configuration is optimal!")
         else:
             for rec in recommendations:
                 st.markdown(f"""
                 <div style="background: rgba(254, 202, 87, 0.1); padding: 1rem; border-radius: 12px; 
                      margin: 0.5rem 0; border-left: 4px solid #feca57;">
                     <div style="display: flex; align-items: center;">
-                        <span style="font-size: 1.2rem; margin-right: 0.5rem;">âš ï¸</span>
+                        <span style="font-size: 1.2rem; margin-right: 0.5rem;">⚠️</span>
                         <span>{rec}</span>
                     </div>
                 </div>
@@ -3399,7 +3399,7 @@ else:
                             backends = service.backends()
                             if backends:
                                 st.session_state.ibm_quantum_configured = True
-                                st.success("âœ… IBM Quantum successfully configured!")
+                                st.success("✅ IBM Quantum successfully configured!")
                             else:
                                 st.error("No IBM Quantum backends available with this API key")
                         else:
@@ -3605,8 +3605,8 @@ else:
         <div style="text-align: center; color: rgba(255,255,255,0.7);">
             <h3>QuantumVerse</h3>
             <p>Next-Generation Quantum Blockchain Platform</p>
-            <p>Version 1.0.0 â€¢ Built with Streamlit and Qiskit</p>
-            <p>Â© 2024 QuantumVerse Team. All rights reserved.</p>
+            <p>Version 1.0.0 • Built with Streamlit and Qiskit</p>
+            <p>© 2024 QuantumVerse Team. All rights reserved.</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -3620,7 +3620,7 @@ st.markdown("""
 <div style="text-align: center; margin-top: 3rem; padding: 2rem; color: rgba(255,255,255,0.5);">
     <div>QuantumVerse - High-Dimensional Quantum Blockchain</div>
     <div style="margin-top: 0.5rem; font-size: 0.9rem;">
-        Built with Streamlit â€¢ Qiskit â€¢ Ed25519 â€¢ Advanced Cryptography
+        Built with Streamlit • Qiskit • Ed25519 • Advanced Cryptography
     </div>
 </div>
 """, unsafe_allow_html=True)
