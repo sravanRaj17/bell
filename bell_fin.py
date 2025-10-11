@@ -1201,10 +1201,15 @@ def load_blockchain():
 # ==================== STREAMLIT APP CONFIGURATION ====================
 
 st.set_page_config(
-    page_title="QuantumVerse - Modern Quantum Blockchain",
-    page_icon="",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title='QuantumVerse - Modern Quantum Blockchain',
+    page_icon='⚛️',
+    layout='wide',
+    initial_sidebar_state='expanded',
+    menu_items={
+        'About': '### QuantumVerse
+A Quantum Blockchain simulation built with Streamlit and Qiskit.',
+        'Show Source': 'https://github.com/sravanRaj17/bell'
+    }
 )
 
 # ==================== MODERN UI STYLING ====================
