@@ -1,0 +1,10 @@
+streamlit
+cryptography
+plotly
+pandas
+numpy
+qrcode
+qiskit
+qiskit-aer
+requests
+qiskit-ibm-runtime
