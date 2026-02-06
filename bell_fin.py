@@ -2029,7 +2029,7 @@ def send_otp_email(receiver_email):
         st.session_state['pending_otp_email'] = receiver_email
         st.session_state['pending_otp_expires'] = (datetime.now() + timedelta(minutes=10)).isoformat()
         sender_email = "quantumverse.supp@gmail.com"
-        sender_password = "izkl sdhq ehsy oivh"
+        sender_password = "worf acmz iyol oadr"
         msg = MIMEText(f"Your QuantumVerse verification code is: {otp}\n\nThis code expires in 10 minutes.")
         msg["Subject"] = "QuantumVerse OTP Verification"
         msg["From"] = sender_email
