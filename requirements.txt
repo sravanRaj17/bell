@@ -1,10 +1,12 @@
 streamlit
 cryptography
-plotly
-pandas
-numpy
-qrcode
 qiskit
 qiskit-aer
-requests
 qiskit-ibm-runtime
+plotly
+pandas
+requests
+numpy
+qrcode
+sqlalchemy
+pysqlite3
