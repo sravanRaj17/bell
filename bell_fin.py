@@ -1,3 +1,7 @@
+# Required packages:
+# pip install streamlit cryptography qiskit qiskit-aer qiskit-ibm-runtime plotly pandas requests numpy qrcode
+# pip install sqlalchemy pysqlite3  # For database
+
 import streamlit as st
 import hashlib
 import json
@@ -8,19 +12,6 @@ from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 import secrets
-
-def aes_gcm_encrypt(plaintext: bytes, key: bytes):
-    """Encrypt plaintext with AES-GCM. Returns (nonce, ciphertext, tag)."""
-    nonce = secrets.token_bytes(12)
-    encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce), backend=default_backend()).encryptor()
-    ciphertext = encryptor.update(plaintext) + encryptor.finalize()
-    tag = encryptor.tag
-    return nonce, ciphertext, tag
-
-def aes_gcm_decrypt(nonce: bytes, ciphertext: bytes, tag: bytes, key: bytes):
-    """Decrypt ciphertext with AES-GCM."""
-    decryptor = Cipher(algorithms.AES(key), modes.GCM(nonce, tag), backend=default_backend()).decryptor()
-    return decryptor.update(ciphertext) + decryptor.finalize()
 import binascii
 import plotly.express as px
 import plotly.graph_objects as go
@@ -38,7 +29,11 @@ import qrcode
 from io import BytesIO
 import threading
 import concurrent.futures
-import secrets  # Added for cryptographically secure random number generation
+
+
+from cryptography.hazmat.primitives import hashes, hmac
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 # Quantum imports
 from qiskit import QuantumCircuit
@@ -48,8 +43,13 @@ from qiskit_aer import AerSimulator
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC  # Added for secure key derivation
-from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+# Database imports
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Float, Boolean
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, scoped_session
+from sqlalchemy.sql import func
 
 # Market data imports
 import requests
@@ -61,6 +61,147 @@ try:
     IBM_QUANTUM_AVAILABLE = True
 except ImportError:
     IBM_QUANTUM_AVAILABLE = False
+
+# ==================== DATABASE SETUP ====================
+
+# Configure database connection (SQLite for local, change for production)
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///quantumverse.db")
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# Database models
+class GlobalLedger(Base):
+    """Stores the blockchain with encrypted blocks"""
+    __tablename__ = "global_ledger"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    index = Column(Integer, unique=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    encrypted_block = Column(Text, nullable=False)  # Encrypted block data as JSON
+    previous_hash = Column(String(64))
+    hash = Column(String(64), unique=True, index=True)
+    miner = Column(String(128))
+    quantum_dimension = Column(Integer, default=4)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class UserRegistry(Base):
+    """Stores user accounts with encrypted keys"""
+    __tablename__ = "user_registry"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(64), unique=True, index=True)
+    password_hash = Column(String(128), nullable=False)
+    public_key = Column(String(128), unique=True, index=True)
+    encrypted_private_key = Column(Text, nullable=False)  # Encrypted with user's DEK
+    encrypted_dek = Column(Text, nullable=False)  # Data Encryption Key encrypted with KEK (BB84 key)
+    quantum_kek = Column(Text)  # Quantum Key Encrypting Key (BB84-derived, updated on login)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    total_sent = Column(Float, default=0.0)
+    total_received = Column(Float, default=0.0)
+    transactions_count = Column(Integer, default=0)
+    last_login = Column(DateTime)
+    is_active = Column(Boolean, default=True)
+
+class NetworkStats(Base):
+    """Stores network statistics"""
+    __tablename__ = "network_stats"
+    
+    id = Column(Integer, primary_key=True)
+    total_transactions = Column(Integer, default=0)
+    total_volume = Column(Float, default=0.0)
+    total_blocks = Column(Integer, default=0)
+    last_update = Column(DateTime, default=datetime.utcnow)
+
+class QuantumKeys(Base):
+    """Stores quantum session keys"""
+    __tablename__ = "quantum_keys"
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, index=True)
+    session_id = Column(String(64), unique=True, index=True)
+    quantum_key = Column(Text)  # Encrypted quantum key
+    dimension = Column(Integer, default=4)
+    hardware_used = Column(String(128))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime)
+
+# Create tables
+Base.metadata.create_all(bind=engine)
+
+def get_db():
+    """Get database session"""
+    db = SessionLocal()
+    try:
+        return db
+    finally:
+        db.close()
+
+# ==================== DATABASE UTILITIES ====================
+
+def aes_gcm_encrypt(plaintext: bytes, key: bytes):
+    """Encrypt plaintext with AES-GCM. Returns (nonce, ciphertext, tag)."""
+    nonce = secrets.token_bytes(12)
+    encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce), backend=default_backend()).encryptor()
+    ciphertext = encryptor.update(plaintext) + encryptor.finalize()
+    tag = encryptor.tag
+    return nonce, ciphertext, tag
+
+def aes_gcm_decrypt(nonce: bytes, ciphertext: bytes, tag: bytes, key: bytes):
+    """Decrypt ciphertext with AES-GCM."""
+    decryptor = Cipher(algorithms.AES(key), modes.GCM(nonce, tag), backend=default_backend()).decryptor()
+    return decryptor.update(ciphertext) + decryptor.finalize()
+
+def encrypt_for_storage(data: dict, key: bytes) -> str:
+    """Encrypt data for database storage"""
+    data_json = json.dumps(data).encode()
+    nonce, ciphertext, tag = aes_gcm_encrypt(data_json, key)
+    encrypted_data = {
+        'nonce': base64.b64encode(nonce).decode(),
+        'ciphertext': base64.b64encode(ciphertext).decode(),
+        'tag': base64.b64encode(tag).decode()
+    }
+    return json.dumps(encrypted_data)
+
+def decrypt_from_storage(encrypted_data: str, key: bytes) -> dict:
+    """Decrypt data from database storage"""
+    data = json.loads(encrypted_data)
+    nonce = base64.b64decode(data['nonce'])
+    ciphertext = base64.b64decode(data['ciphertext'])
+    tag = base64.b64decode(data['tag'])
+    decrypted = aes_gcm_decrypt(nonce, ciphertext, tag, key)
+    return json.loads(decrypted.decode())
+
+def get_network_stats():
+    """Get current network statistics"""
+    db = get_db()
+    stats = db.query(NetworkStats).first()
+    if not stats:
+        stats = NetworkStats()
+        db.add(stats)
+        db.commit()
+    db.close()
+    return stats
+
+def update_network_stats(transactions_added=0, volume_added=0, blocks_added=0):
+    """Update network statistics with safety check for NoneType"""
+    db = get_db()
+    stats = db.query(NetworkStats).first()
+    
+    # Initialization check: Create stats row if it doesn't exist
+    if not stats:
+        stats = NetworkStats(total_transactions=0, total_volume=0.0, total_blocks=0)
+        db.add(stats)
+        db.flush() # Ensure the object gets assigned default values
+    
+    # Safe update logic
+    stats.total_transactions = (stats.total_transactions or 0) + transactions_added
+    stats.total_volume = (stats.total_volume or 0.0) + float(volume_added)
+    stats.total_blocks = (stats.total_blocks or 0) + blocks_added
+    stats.last_update = datetime.utcnow()
+    
+    db.commit()
+    db.close()
 
 # ==================== MARKET DATA FUNCTIONS ====================
 
@@ -395,7 +536,7 @@ def estimate_error_rate(indices, alice_symbols, measured_symbols, alice_bases, b
     if use_auth:
         indices_str = json.dumps(indices)
         # Use enhanced HMAC with both quantum and classical keys
-        hmac_key = (st.session_state.get("quantum_keys", {}).get(st.session_state.get("logged_in_user", ""), ""), auth_key)
+        hmac_key = (st.session_state.get("current_kek", ""), auth_key)
         indices_hmac = generate_hmac(indices_str, hmac_key)
         if not verify_hmac(indices_str, indices_hmac, hmac_key):
             st.error("Authentication failed: Sample indices could not be verified")
@@ -417,7 +558,7 @@ def estimate_error_rate(indices, alice_symbols, measured_symbols, alice_bases, b
     
     if use_auth:
         sample_indices_str = json.dumps(sample_indices)
-        hmac_key = (st.session_state.get("quantum_keys", {}).get(st.session_state.get("logged_in_user", ""), ""), auth_key)
+        hmac_key = (st.session_state.get("current_kek", ""), auth_key)
         sample_indices_hmac = generate_hmac(sample_indices_str, hmac_key)
         if not verify_hmac(sample_indices_str, sample_indices_hmac, hmac_key):
             st.error("Authentication failed: Sample indices could not be verified")
@@ -430,7 +571,7 @@ def estimate_error_rate(indices, alice_symbols, measured_symbols, alice_bases, b
     
     if use_auth:
         error_count_str = str(error_count)
-        hmac_key = (st.session_state.get("quantum_keys", {}).get(st.session_state.get("logged_in_user", ""), ""), auth_key)
+        hmac_key = (st.session_state.get("current_kek", ""), auth_key)
         error_count_hmac = generate_hmac(error_count_str, hmac_key)
         if not verify_hmac(error_count_str, error_count_hmac, hmac_key):
             st.error("Authentication failed: Error count could not be verified")
@@ -590,7 +731,7 @@ def run_high_dimensional_bb84_protocol(key_length=256, dimension=4, backend=None
         }
         auth_data_str = json.dumps(auth_data)
         # Use enhanced HMAC with both quantum and classical keys
-        hmac_key = (st.session_state.get("quantum_keys", {}).get(st.session_state.get("logged_in_user", ""), ""), auth_psk)
+        hmac_key = (st.session_state.get("current_kek", ""), auth_psk)
         auth_hmac = generate_hmac(auth_data_str, hmac_key)
         if not verify_hmac(auth_data_str, auth_hmac, hmac_key):
             st.error("Authentication failed: Quantum state information could not be verified")
@@ -629,7 +770,7 @@ def run_high_dimensional_bb84_protocol(key_length=256, dimension=4, backend=None
     
     if use_auth:
         sample_indices_str = json.dumps(sample_indices)
-        hmac_key = (st.session_state.get("quantum_keys", {}).get(st.session_state.get("logged_in_user", ""), ""), auth_psk)
+        hmac_key = (st.session_state.get("current_kek", ""), auth_psk)
         sample_indices_hmac = generate_hmac(sample_indices_str, hmac_key)
         if not verify_hmac(sample_indices_str, sample_indices_hmac, hmac_key):
             st.error("Authentication failed: Sample indices could not be verified")
@@ -637,12 +778,12 @@ def run_high_dimensional_bb84_protocol(key_length=256, dimension=4, backend=None
             
     error_count = 0
     for idx in sample_indices:
-      if sifted_key_alice[idx] != sifted_key_bob[idx]:   #fixed
-        error_count += 1
+        if sifted_key_alice[idx] != sifted_key_bob[idx]:
+            error_count += 1
             
     if use_auth:
         error_count_str = str(error_count)
-        hmac_key = (st.session_state.get("quantum_keys", {}).get(st.session_state.get("logged_in_user", ""), ""), auth_psk)
+        hmac_key = (st.session_state.get("current_kek", ""), auth_psk)
         error_count_hmac = generate_hmac(error_count_str, hmac_key)
         if not verify_hmac(error_count_str, error_count_hmac, hmac_key):
             st.error("Authentication failed: Error count could not be verified")
@@ -829,7 +970,6 @@ def build_merkle_tree(transactions):
         ]
     return tx_hashes[0]
 
-
 def generate_wallet(username):
     """Generate new wallet with Ed25519 keys"""
     # Generate Ed25519 private/public key pair and export raw bytes as hex
@@ -847,8 +987,6 @@ def generate_wallet(username):
         "total_received": 0,
         "transactions_count": 0
     }
-
-
 
 def verify_signature(transaction) -> bool:
     """Verify Ed25519 signature"""
@@ -869,334 +1007,369 @@ def verify_signature(transaction) -> bool:
     except Exception:
         return False
 
-
-def update_balances(transactions):
-    """Update account balances"""
-    for tx in transactions:
-        sender = tx["sender"]
-        receiver = tx["receiver"]
-        amount = float(tx["amount"])
-        if sender != "network":
-            st.session_state.balances[sender] = st.session_state.balances.get(sender, 0) - amount
-        st.session_state.balances[receiver] = st.session_state.balances.get(receiver, 0) + amount
-
-def process_transaction(transaction) -> bool:
-    """Process and confirm transaction"""
-    if not verify_signature(transaction):
-        st.error("Invalid transaction signature!")
-        return False
-
-    previous_hash = st.session_state.blockchain[-1]["hash"] if st.session_state.blockchain else "0"
+def get_user_balance(public_key):
+    """Calculate user balance from blockchain"""
+    db = get_db()
+    balance = 0.0
     
-    new_block = {
-        "index": len(st.session_state.blockchain),
-        "transactions": [transaction],
-        "merkle_root": build_merkle_tree([transaction]),
-        "timestamp": str(datetime.now()),
-        "previous_hash": previous_hash,
-        "miner": "network",
-        "quantum_dimension": st.session_state.quantum_dimension
-    }
-    new_block["hash"] = calculate_hash(new_block)
+    # Get all blocks
+    blocks = db.query(GlobalLedger).order_by(GlobalLedger.index).all()
+    
+    for block in blocks:
+        # Decrypt block with network DEK (for demo, we'll use a simplified approach)
+        # In production, each user would decrypt with their own DEK
+        try:
+            block_data = json.loads(block.encrypted_block)  # For now, store plain JSON
+            for tx in block_data.get("transactions", []):
+                if tx["sender"] == public_key:
+                    balance -= float(tx["amount"])
+                if tx["receiver"] == public_key:
+                    balance += float(tx["amount"])
+        except:
+            continue
+    
+    db.close()
+    return max(0, balance)
 
-    st.session_state.blockchain.append(new_block)
-    update_balances([transaction])
-
-    st.session_state.network_stats["total_transactions"] += 1
-    st.session_state.network_stats["total_volume"] += float(transaction["amount"])
+def save_block_to_db(block_data):
+    """Save a block to the database"""
+    db = get_db()
+    
+    # Check if block already exists
+    existing = db.query(GlobalLedger).filter(GlobalLedger.index == block_data["index"]).first()
+    if existing:
+        db.close()
+        return False
+    
+    # For now, store block data as plain JSON
+    # In production, encrypt with network DEK
+    encrypted_block = json.dumps(block_data)
+    
+    block = GlobalLedger(
+        index=block_data["index"],
+        timestamp=datetime.fromisoformat(block_data["timestamp"].replace('Z', '+00:00')),
+        encrypted_block=encrypted_block,
+        previous_hash=block_data["previous_hash"],
+        hash=block_data["hash"],
+        miner=block_data.get("miner", "network"),
+        quantum_dimension=block_data.get("quantum_dimension", 4)
+    )
+    
+    db.add(block)
+    db.commit()
+    db.close()
+    
+    update_network_stats(blocks_added=1)
     return True
 
+def get_blockchain():
+    """Get all blocks from database"""
+    db = get_db()
+    blocks = db.query(GlobalLedger).order_by(GlobalLedger.index).all()
+    
+    blockchain = []
+    for block in blocks:
+        try:
+            block_data = json.loads(block.encrypted_block)
+            block_data["hash"] = block.hash
+            block_data["previous_hash"] = block.previous_hash
+            block_data["timestamp"] = block.timestamp.isoformat()
+            blockchain.append(block_data)
+        except:
+            continue
+    
+    db.close()
+    return blockchain
 
-
-def create_transaction(sender_private_key_hex, receiver_public_key, amount, tx_type="transfer", fee: float = 0.0):
-    """
-    Create and sign a transaction using Ed25519 keys, then secure the signed report with a BB84-derived key
-    generated in cooperation with the Authentication Unit (a bank-like authority). The encrypted signed report
-    is submitted to the Authentication Unit which decrypts, verifies the Ed25519 signature, and appends the
-    transaction to the blockchain if valid.
-
-    This function integrates the simulated BB84 flow (or a pluggable real BB84 routine) and keeps compatibility
-    with the Streamlit session state used by the rest of the app.
-    """
+def create_user(username, password, quantum_kek=None):
+    """Create new user with 1000 QCoins initial balance and persistent storage"""
+    db = get_db()
+    
     try:
-        sender_sk = ed25519.Ed25519PrivateKey.from_private_bytes(binascii.unhexlify(sender_private_key_hex))
-        sender_public_key = sender_sk.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
-    except (binascii.Error, ValueError):
-        st.error("Invalid private key format.")
-        return None
-
-    # Parse amounts
-    try:
-        amount = float(amount)
-        fee = float(fee)
-    except Exception:
-        st.error("Invalid amount or fee.")
-        return None
-
-    balance = st.session_state.balances.get(sender_public_key, 0.0)
-    total_cost = amount + fee
-    if balance < total_cost:
-        st.error(f"Insufficient funds! Need {total_cost:.2f} coins, have {balance:.2f}")
-        return None
-
-    # Build a simple transaction report (signed) - the same canonical JSON will be verified by the auth unit
-    report = {
-        "sender": sender_public_key,
-        "receiver": receiver_public_key,
-        "amount": amount,
-        "fee": fee,
-        "type": tx_type,
-        "timestamp": str(datetime.now()),
-    }
-    report_bytes = json.dumps(report, sort_keys=True).encode()
-
-    # Sign the report with Ed25519
-    try:
-        signature = sender_sk.sign(report_bytes).hex()
-    except Exception as e:
-        st.error(f"Signing failed: {e}")
-        return None
-
-    # --- Quantum (BB84) session with Authentication Unit ---
-    # Use an AuthenticationUnit stored in session (create one if missing)
-    try:
-        # Lazy import of our helper functions (either from this file or the separate module)
-        # If the app has its own one_time_circuit_high_dim_bb84 function, prefer to use it.
-        use_internal_bb84 = False
-        if 'one_time_circuit_high_dim_bb84' in globals() and callable(globals()['one_time_circuit_high_dim_bb84']):
-            use_internal_bb84 = True
-
-        session_id = f"sess_{int(time.time())}_{secrets.randbelow(900000)}"
-
-        # Acquire BB84-derived raw key (either real function or simulated one)
-        if use_internal_bb84:
-            bb84_key_hex = one_time_circuit_high_dim_bb84(256, st.session_state.quantum_dimension)
-            if bb84_key_hex is None:
-                st.error("Failed to generate quantum key. Transaction aborted.")
-                return None
-            raw_bb84 = binascii.unhexlify(bb84_key_hex)
-        else:
-            # fallback: simulate secure BB84 key
-            raw_bb84 = secrets.token_bytes(32)
-
-        # Derive AES key from raw BB84 material (HKDF)
-        hkdf = HKDF(
-            algorithm=hashes.SHA3_256() if hasattr(hashes, 'SHA3_256') else hashes.SHA256(),
+        # Check if username exists
+        existing = db.query(UserRegistry).filter(UserRegistry.username == username).first()
+        if existing:
+            db.close()
+            return False, "Username already exists"
+        
+        # 1. Generate standard wallet
+        wallet = generate_wallet(username)
+        
+        # 2. Derive a 32-byte key from password for SQL storage
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
             length=32,
-            salt=None,
-            info=b'bb84-aes-key',
+            salt=b'quantumverse_static_salt',
+            iterations=100000,
             backend=default_backend()
         )
-        aes_key = hkdf.derive(raw_bb84)
+        storage_key = kdf.derive(password.encode())
+        
+        # 3. Encrypt private key for database
+        nonce, ciphertext, tag = aes_gcm_encrypt(
+            wallet["private_key"].encode(), 
+            storage_key
+        )
+        
+        encrypted_priv_data = {
+            'nonce': base64.b64encode(nonce).decode(),
+            'ciphertext': base64.b64encode(ciphertext).decode(),
+            'tag': base64.b64encode(tag).decode()
+        }
+        
+        # 4. Save to UserRegistry with initial stats
+        user = UserRegistry(
+            username=username,
+            password_hash=hashlib.sha256(password.encode()).hexdigest(),
+            public_key=wallet["public_key"],
+            encrypted_private_key=json.dumps(encrypted_priv_data),
+            encrypted_dek="NORMAL_STORAGE",
+            quantum_kek=quantum_kek,
+            total_received=1000.0,
+            created_at=datetime.utcnow()
+        )
+        db.add(user)
+        db.commit()
+        user_id = user.id
 
-        # Ensure there is an Authentication Unit instance in session state (bank-like authority)
-        if 'auth_unit' not in st.session_state:
-            # Minimal in-memory auth unit that mirrors the demo AuthenticationUnit
-            class _InAppAuthUnit:
-                def __init__(self):
-                    self.session_keys = {}
-                    self.blockchain = st.session_state.blockchain  # link to the app blockchain list
-                def store_session_key(self, sid, key, theta=None):
-                    # store key bytes and associated theta for this session
-                    self.session_keys[sid] = {'key': key, 'theta': theta}
-                def get_session_key(self, sid):
-                    v = self.session_keys.get(sid)
-                    return v['key'] if v and isinstance(v, dict) else v
-                def get_session_theta(self, sid):
-                    v = self.session_keys.get(sid)
-                    return v.get('theta') if v and isinstance(v, dict) else None
-                def verify_and_process_encrypted_report(self, encrypted_blob):
-                    # This will be implemented below using the same logic as the demo module
-                    session_id = encrypted_blob.get('session_id')
-                    key = self.get_session_key(session_id)
-                    if not key:
-                        return False, 'no session key'
-                    try:
-                        nonce = binascii.unhexlify(encrypted_blob['nonce'])
-                        ciphertext = binascii.unhexlify(encrypted_blob['ciphertext'])
-                        tag = binascii.unhexlify(encrypted_blob['tag'])
-                        plaintext = aes_gcm_decrypt(nonce, ciphertext, tag, key)
-                        payload = json.loads(plaintext.decode())
-                        report = payload.get('report')
-                        signature_hex = payload.get('signature')
-                        sender_pub_hex = payload.get('sender_public_key')
-                        if not report or not signature_hex or not sender_pub_hex:
-                            return False, 'missing fields'
-                        vk = ed25519.Ed25519PublicKey.from_public_bytes(binascii.unhexlify(sender_pub_hex))
-                        vk.verify(binascii.unhexlify(signature_hex), json.dumps(report, sort_keys=True).encode())
-                        # Append to blockchain as a new block containing the transaction report
-                        prev_hash = st.session_state.blockchain[-1]['hash'] if st.session_state.blockchain else '0'
-                        new_block = {
-                            'index': len(st.session_state.blockchain),
-                            'transactions': [report],
-                            'merkle_root': build_merkle_tree([report]),
-                            'timestamp': str(datetime.now()),
-                            'previous_hash': prev_hash,
-                            'miner': 'auth_unit',
-                            'quantum_dimension': st.session_state.quantum_dimension
-                        }
-                        new_block['hash'] = calculate_hash(new_block)
-                        st.session_state.blockchain.append(new_block)
-                        # Update balances locally
-                        update_balances([report])
-                        st.session_state.network_stats['total_transactions'] += 1
-                        st.session_state.network_stats['total_volume'] += float(report.get('amount',0))
-                        return True, 'ok'
-                    except Exception as e:
-                        return False, f'decrypt/verify error: {e}'
-
-            st.session_state['auth_unit'] = _InAppAuthUnit()
-
-        auth_unit = st.session_state['auth_unit']
-
-        # Store the AES session key at the auth unit side, simulating the BB84 shared key placement
-        auth_unit.store_session_key(session_id, aes_key)
-        # Also keep a reference in the app session for auditing
-        st.session_state['quantum_keys'][session_id] = binascii.hexlify(raw_bb84).decode()
-
+        # 5. Create Genesis Block if it doesn't exist
+        blockchain = get_blockchain()
+        
+        if not blockchain:
+            # Create genesis block
+            genesis_block = {
+                "index": 0,
+                "transactions": [],
+                "merkle_root": "0",
+                "timestamp": datetime.now().isoformat(),
+                "previous_hash": "0",
+                "miner": "network",
+                "quantum_dimension": 4
+            }
+            genesis_block["hash"] = calculate_hash(genesis_block)
+            save_block_to_db(genesis_block)
+            blockchain = get_blockchain()
+        
+        # 6. Create Initial Grant Transaction
+        grant_tx = {
+            "sender": "network",
+            "receiver": wallet["public_key"],
+            "amount": 1000.0,
+            "fee": 0.0,
+            "type": "initial_grant",
+            "timestamp": datetime.now().isoformat(),
+            "quantum_secured": False,
+            "signature": ""
+        }
+        
+        # Create block for the grant
+        new_block = {
+            "index": len(blockchain),
+            "transactions": [grant_tx],
+            "merkle_root": build_merkle_tree([grant_tx]),
+            "timestamp": datetime.now().isoformat(),
+            "previous_hash": blockchain[-1]["hash"] if blockchain else "0",
+            "miner": "network",
+            "quantum_dimension": 4
+        }
+        new_block["hash"] = calculate_hash(new_block)
+        
+        # Save the block
+        save_block_to_db(new_block)
+        
+        # Update network stats
+        update_network_stats(transactions_added=1, volume_added=1000.0)
+        
+        return True, user_id
+        
     except Exception as e:
-        st.error(f"BB84/session setup failed: {e}")
-        return None
+        db.rollback()
+        return False, f"Error creating user: {str(e)}"
+    finally:
+        db.close()
 
-    # --- Prepare encrypted payload: include report, signature, and sender public key ---
-    payload = {
-        'report': report,
-        'signature': signature,
-        'sender_public_key': sender_public_key,
-    }
-    payload_bytes = json.dumps(payload, sort_keys=True).encode()
-
-    try:
-        nonce, ciphertext, tag = aes_gcm_encrypt(payload_bytes, aes_key)
-    except Exception as e:
-        st.error(f"Encryption failed: {e}")
-        return None
-
-    encrypted_blob = {
-        'session_id': session_id,
-        'nonce': nonce.hex(),
-        'ciphertext': ciphertext.hex(),
-        'tag': tag.hex(),
-        'sender_public_key': sender_public_key,
-        'quantum_secured': True,
-        'quantum_method': 'bb84-integration',
-        'quantum_key_length': len(raw_bb84) * 8,
-    }
-
-    # Submit to Authentication Unit (in-app)
-    ok, msg = auth_unit.verify_and_process_encrypted_report(encrypted_blob)
-    if ok:
-        st.balloons()
-        st.success('Transaction processed and added to blockchain via Authentication Unit.')
-        return encrypted_blob
-    else:
-        st.error(f'Transaction rejected by Authentication Unit: {msg}')
-        return None
-def bb84_encrypt(message, key_hex):
-    """Encrypt message using BB84-derived key"""
-    try:
-        key = binascii.unhexlify(key_hex)
-        if len(key) != 32:
-            hk = HKDF(
-                algorithm=hashes.SHA3_256(),
-                length=32,
-                salt=None,
-                info=b'bb84-aes-key',
-                backend=default_backend()
-            )
-            key = hk.derive(key)
-
-        nonce = os.urandom(12)
-        cipher = Cipher(algorithms.AES(key), modes.GCM(nonce), backend=default_backend())
-        encryptor = cipher.encryptor()
-        ciphertext = encryptor.update(message.encode()) + encryptor.finalize()
-        encrypted_data = nonce + ciphertext + encryptor.tag
-        return base64.b64encode(encrypted_data).decode()
-    except Exception as e:
-        st.error(f"Encryption error: {e}")
-        return None
-
-def bb84_decrypt(ciphertext_b64, key_hex):
-    """Decrypt message using BB84-derived key"""
-    try:
-        key = binascii.unhexlify(key_hex)
-        if len(key) != 32:
-            hk = HKDF(
-                algorithm=hashes.SHA3_256(),
-                length=32,
-                salt=None,
-                info=b'bb84-aes-key',
-                backend=default_backend()
-            )
-            key = hk.derive(key)
-
-        encrypted_data = base64.b64decode(ciphertext_b64)
-        nonce = encrypted_data[:12]
-        ciphertext = encrypted_data[12:-16]
-        tag = encrypted_data[-16:]
-        cipher = Cipher(algorithms.AES(key), modes.GCM(nonce, tag), backend=default_backend())
-        decryptor = cipher.decryptor()
-        plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-        return plaintext.decode()
-    except Exception as e:
-        st.error(f"Decryption error: {e}")
-        return None
-
-def refresh_balance(public_key):
-    """Recalculate balance from blockchain"""
-    balance = 0.0
-    for block in st.session_state.blockchain:
-        for tx in block["transactions"]:
-            if tx["sender"] == public_key:
-                balance -= float(tx["amount"])
-            if tx["receiver"] == public_key:
-                balance += float(tx["amount"])
+def authenticate_user(username, password):
+    """Authenticate user and decrypt wallet from SQL"""
+    db = get_db()
+    user = db.query(UserRegistry).filter(UserRegistry.username == username).first()
+    if not user:
+        db.close()
+        return False, "User not found"
     
-    st.session_state.balances[public_key] = max(0, balance)
-    return st.session_state.balances[public_key]
-
-def save_blockchain():
-    """Save blockchain to file"""
-    data = {
-        "blockchain": st.session_state.blockchain,
-        "balances": st.session_state.balances,
-        "users": {k: {kk: vv for kk, vv in v.items() if kk != "private_key" and kk != "password_hash"}
-                 for k, v in st.session_state.users.items()},
-        "network_stats": st.session_state.network_stats,
-        "quantum_keys": st.session_state.quantum_keys,
-        "last_save": datetime.now().isoformat()
-    }
+    if user.password_hash != hashlib.sha256(password.encode()).hexdigest():
+        db.close()
+        return False, "Invalid password"
+    
     try:
-        with open(st.session_state.blockchain_file, "w") as f:
-            json.dump(data, f, indent=2)
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=b'quantumverse_static_salt',
+            iterations=100000,
+            backend=default_backend()
+        )
+        storage_key = kdf.derive(password.encode())
+        
+        encrypted_priv_data = json.loads(user.encrypted_private_key)
+        nonce = base64.b64decode(encrypted_priv_data['nonce'])
+        ciphertext = base64.b64decode(encrypted_priv_data['ciphertext'])
+        tag = base64.b64decode(encrypted_priv_data['tag'])
+        
+        private_key = aes_gcm_decrypt(nonce, ciphertext, tag, storage_key).decode()
+        
     except Exception as e:
-        st.error(f"Error saving ledger: {e}")
+        db.close()
+        return False, f"Wallet decryption failed: {str(e)}"
+    
+    # Update last login
+    user.last_login = datetime.utcnow()
+    db.commit()
+    
+    # Extract user data BEFORE closing the session
+    user_data = {
+        "user_id": user.id,  # <-- Access user.id while session is still open
+        "username": user.username,
+        "public_key": user.public_key,
+        "private_key": private_key,
+        "dek": storage_key.hex()
+    }
+    
+    db.close()  # Now close the session
+    return True, user_data
 
-def load_blockchain():
-    """Load blockchain from file"""
-    if os.path.exists(st.session_state.blockchain_file):
-        try:
-            with open(st.session_state.blockchain_file, "r") as f:
-                data = json.load(f)
-                st.session_state.blockchain = data.get("blockchain", [])
-                st.session_state.balances = data.get("balances", {})
-                st.session_state.network_stats = data.get("network_stats", {"total_transactions": 0, "total_volume": 0})
-                st.session_state.quantum_keys = data.get("quantum_keys", {})
-                st.success("Ledger loaded successfully!")
-        except Exception as e:
-            st.error(f"Error loading ledger: {e}")
-            if not st.session_state.blockchain:
-                genesis_block = {
-                    "index": 0,
-                    "transactions": [],
-                    "merkle_root": "0",
-                    "timestamp": str(datetime.now()),
-                    "previous_hash": "0",
-                    "hash": calculate_hash({"index": 0, "timestamp": str(datetime.now())}),
-                    "miner": "network",
-                    "quantum_dimension": st.session_state.quantum_dimension
-                }
-                st.session_state.blockchain.append(genesis_block)
+def create_transaction(sender_private_key_hex, receiver_public_key, amount, tx_type="transfer", fee: float = 0.0):
+    """Signs and processes a transaction into the SQL database"""
+    try:
+        # Convert hex private key to Ed25519 private key
+        sender_sk = ed25519.Ed25519PrivateKey.from_private_bytes(
+            binascii.unhexlify(sender_private_key_hex)
+        )
+        # Get public key from private key
+        sender_public_key = sender_sk.public_key().public_bytes(
+            Encoding.Raw, PublicFormat.Raw
+        ).hex()
+        
+        amount = float(amount)
+        fee = float(fee)
+        
+        # Check balance
+        balance = get_user_balance(sender_public_key)
+        if balance < (amount + fee):
+            st.error(f"Insufficient funds! Available: {balance:.2f}, Required: {amount + fee:.2f}")
+            return None
+
+        # Build transaction body (excluding signature)
+        tx_body = {
+            "sender": sender_public_key,
+            "receiver": receiver_public_key,
+            "amount": amount,
+            "fee": fee,
+            "type": tx_type,
+            "timestamp": datetime.now().isoformat(),
+        }
+        
+        # Sign the transaction
+        tx_string = json.dumps(tx_body, sort_keys=True).encode()
+        signature = sender_sk.sign(tx_string).hex()
+        
+        # Create final transaction with signature
+        transaction = tx_body.copy()
+        transaction["signature"] = signature
+        transaction["quantum_secured"] = True
+        transaction["quantum_dimension"] = st.session_state.get("quantum_dimension", 4)
+        transaction["quantum_hardware"] = st.session_state.get("last_hardware_used", "Aer Simulator")
+
+        # Get current blockchain and create new block
+        blockchain = get_blockchain()
+        
+        # If no blocks exist, create genesis block first
+        if not blockchain:
+            genesis_block = {
+                "index": 0,
+                "transactions": [],
+                "merkle_root": "0",
+                "timestamp": datetime.now().isoformat(),
+                "previous_hash": "0",
+                "miner": "network",
+                "quantum_dimension": 4
+            }
+            genesis_block["hash"] = calculate_hash(genesis_block)
+            save_block_to_db(genesis_block)
+            blockchain = get_blockchain()
+        
+        # Create new block with transaction
+        new_block = {
+            "index": len(blockchain),
+            "transactions": [transaction],
+            "merkle_root": build_merkle_tree([transaction]),
+            "timestamp": datetime.now().isoformat(),
+            "previous_hash": blockchain[-1]["hash"] if blockchain else "0",
+            "miner": st.session_state.logged_in_user,
+            "quantum_dimension": transaction["quantum_dimension"]
+        }
+        new_block["hash"] = calculate_hash(new_block)
+        
+        # Save to database
+        if save_block_to_db(new_block):
+            # Update network statistics
+            update_network_stats(
+                transactions_added=1, 
+                volume_added=amount + fee
+            )
+            
+            # Update user statistics in registry
+            db = get_db()
+            sender_user = db.query(UserRegistry).filter(
+                UserRegistry.public_key == sender_public_key
+            ).first()
+            receiver_user = db.query(UserRegistry).filter(
+                UserRegistry.public_key == receiver_public_key
+            ).first()
+            
+            if sender_user:
+                sender_user.total_sent = (sender_user.total_sent or 0.0) + amount
+                sender_user.transactions_count = (sender_user.transactions_count or 0) + 1
+            
+            if receiver_user:
+                receiver_user.total_received = (receiver_user.total_received or 0.0) + amount
+                if sender_user != receiver_user:  # Don't double count self-transfers
+                    receiver_user.transactions_count = (receiver_user.transactions_count or 0) + 1
+            
+            db.commit()
+            db.close()
+            
+            st.success(f"✅ Transaction successful! Sent {amount} QCoins")
+            return transaction
+        else:
+            st.error("Failed to save block to database")
+            return None
+            
+    except Exception as e:
+        st.error(f"Transaction failed: {str(e)}")
+        return None
+    
+def get_all_users():
+    """Get all users from database"""
+    db = get_db()
+    users = db.query(UserRegistry).filter(UserRegistry.is_active == True).all()
+    result = []
+    for user in users:
+        result.append({
+            "id": user.id,
+            "username": user.username,
+            "public_key": user.public_key,
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+            "last_login": user.last_login.isoformat() if user.last_login else None
+        })
+    db.close()
+    return result
+
+def get_user_by_username(username):
+    """Get user by username"""
+    db = get_db()
+    user = db.query(UserRegistry).filter(UserRegistry.username == username).first()
+    db.close()
+    return user
 
 # ==================== STREAMLIT APP CONFIGURATION ====================
 
@@ -1750,16 +1923,11 @@ st.markdown("""
 
 # ==================== SESSION STATE INITIALIZATION ====================
 
-
 def initialize_session_state():
-    """Initialize all session state variables (demo users removed)."""
+    """Initialize session state variables"""
     defaults = {
-        "users": {},
-        "balances": {},
-        "blockchain": [],
-        "network_stats": {"total_transactions": 0, "total_volume": 0},
-        "price_history": [],
-        "quantum_keys": {},
+        "logged_in_user": None,
+        "current_user_data": None,
         "quantum_dimension": 4,
         "ibm_api_key": "",
         "ibm_channel": "ibm_quantum",
@@ -1770,13 +1938,11 @@ def initialize_session_state():
         "last_quantum_backend": "",
         "authentication_psk": hashlib.sha256(b"quantumverse_default_psk").hexdigest(),
         "authentication_enabled": True,
-        "auth_keys": {},
         "reconciliation_block_size": 12,
         "reconciliation_max_iterations": 8,
         "error_correction_strength": 2,
-        "blockchain_file": "quantumverse_blockchain.json",
-        "current_tab": "wallet",
-        # Add market data defaults
+        "current_kek": None,
+        "current_dek": None,
         "market_data": {
             "crypto": None,
             "fiat": None,
@@ -1784,122 +1950,18 @@ def initialize_session_state():
             "auto_refresh": True
         },
         "selected_crypto": None,
-        "selected_crypto_name": None
+        "selected_crypto_name": None,
+        "use_ansatz": False,
+        "ansatz_params": np.zeros(4),
+        "ansatz_param_count": 8,
+        "calibration_runs": 30
     }
 
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
-    # NOTE: Demo users removed. Use the Create Account flow to register new users.
-
 initialize_session_state()
-
-# ==================== TOP NAVIGATION BAR ====================
-
-# Add custom CSS for the navigation
-st.markdown("""
-<style>
-    /* Top navigation bar */
-    .top-nav {
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        z-index: 1000;
-        background: rgba(10, 14, 26, 0.95);
-        backdrop-filter: blur(20px);
-        border-bottom: 1px solid rgba(255,255,255,0.1);
-        padding: 1rem 2rem;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-    }
-    
-    .nav-container {
-        display: flex;
-        align-items: center;
-        gap: 2rem;
-    }
-    
-    .nav-logo {
-        font-size: 1.5rem;
-        font-weight: 800;
-        background: linear-gradient(135deg, #667eea, #764ba2);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-    }
-    
-    .nav-items {
-        display: flex;
-        gap: 1rem;
-    }
-    
-    .nav-item {
-        padding: 0.5rem 1rem;
-        border-radius: 12px;
-        cursor: pointer;
-        transition: all 0.3s ease;
-        font-weight: 600;
-    }
-    
-    .nav-item:hover {
-        background: rgba(102, 126, 234, 0.2);
-        transform: translateY(-2px);
-    }
-    
-    .nav-item.active {
-        background: rgba(102, 126, 234, 0.3);
-        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
-    }
-    
-    .user-section {
-        display: flex;
-        align-items: center;
-        gap: 1rem;
-    }
-    
-    .user-badge {
-        background: rgba(255,255,255,0.1);
-        padding: 0.5rem 1rem;
-        border-radius: 20px;
-        border: 1px solid rgba(255,255,255,0.2);
-    }
-    
-    .logout-btn {
-        background: rgba(255,107,107,0.2);
-        padding: 0.5rem;
-        border-radius: 50%;
-        width: 40px;
-        height: 40px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        cursor: pointer;
-        transition: all 0.3s ease;
-        border: 1px solid rgba(255,107,107,0.3);
-    }
-    
-    .logout-btn:hover {
-        background: rgba(255,107,107,0.4);
-        transform: scale(1.1);
-    }
-    
-    /* Main content padding to account for fixed nav */
-    .main-content {
-        padding-top: 80px;
-    }
-    
-    /* Hide Streamlit elements */
-    .stApp > header {
-        display: none;
-    }
-    
-    section[data-testid="stSidebar"] {
-        display: none;
-    }
-</style>
-""", unsafe_allow_html=True)
 
 # ==================== MAIN HEADER ====================
 
@@ -1911,31 +1973,15 @@ st.markdown(f"""
         <br>
         <span class="dimension-badge">{st.session_state.quantum_dimension}-D Quantum Security</span>
         <span class="hardware-badge">{st.session_state.last_hardware_used}</span>
+        <span class="quantum-badge">SQL Database</span>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
-# ==================== GENESIS BLOCK SETUP ====================
-
-if not st.session_state.blockchain:
-    genesis_block = {
-        "index": 0,
-        "transactions": [],
-        "merkle_root": "0",
-        "timestamp": str(datetime.now()),
-        "previous_hash": "0",
-        "hash": calculate_hash({"index": 0, "timestamp": str(datetime.now())}),
-        "miner": "network",
-        "quantum_dimension": st.session_state.quantum_dimension
-    }
-    st.session_state.blockchain.append(genesis_block)
-
 # ==================== LOGIN SYSTEM ====================
 
 def send_otp_email(receiver_email):
-    """Send a 6-digit OTP to receiver_email using the configured support account.
-    OTP is stored temporarily in st.session_state['pending_otp'] (expires in 10 minutes).
-    """
+    """Send a 6-digit OTP to receiver_email using the configured support account."""
     try:
         import smtplib
         from email.mime.text import MIMEText
@@ -1957,140 +2003,113 @@ def send_otp_email(receiver_email):
         st.error(f"Failed to send OTP: {e}")
         return False
 
-if "logged_in_user" not in st.session_state:
+if not st.session_state.logged_in_user:
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.markdown("""
-        <div class="login-container">
-            <div class="login-title"> Quantum Secure Access</div>
-        """, unsafe_allow_html=True)
-
-        # Simple login by username (entered) + password
-        with st.form("login_form", clear_on_submit=True):
-            username_input = st.text_input(" Enter Username")
-            password_input = st.text_input(" Enter Quantum Password", type="password")
-
-            col_l, col_r = st.columns(2)
-            with col_l:
-                login_btn = st.form_submit_button(" Quantum Login", use_container_width=True)
-            with col_r:
-                create_flow_btn = st.form_submit_button(" Create Account", use_container_width=True)
-
-            if login_btn:
-                # Try to find user by username
-                found_key = None
-                for k, v in st.session_state.users.items():
-                    if v.get('username') == username_input:
-                        found_key = k
-                        break
-                if found_key:
-                    password_hash = hashlib.sha256(password_input.encode()).hexdigest()
-                    if password_hash == st.session_state.users[found_key].get("password_hash", ""):
-                        st.session_state.logged_in_user = found_key
-                        st.success("✅ Login successful!")
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        st.error(" Invalid quantum credentials")
-                else:
-                    st.error(" User not found. Please create an account.")
-
-            if create_flow_btn:
-                # Start create account flow
-                st.session_state['show_create_account'] = True
-                st.rerun()
-
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        # ---------- Create Account Flow ----------
-        if st.session_state.get('show_create_account', False):
-            st.markdown("""
-            <div class="modern-card" style="margin-top:1rem;">
-                <h4 style="margin-top:0;">Create QuantumVerse Account</h4>
-                <p>Provide an email to receive an OTP for verification.</p>
-            </div>
-            """, unsafe_allow_html=True)
-
-            # Step 1: Send OTP
-            with st.form("create_account_send_otp", clear_on_submit=False):
-                otp_email = st.text_input(" Verification Email", value=st.session_state.get('pending_otp_email',''))
-                send_otp_btn = st.form_submit_button(" Send OTP to Email", use_container_width=True)
-                if send_otp_btn:
-                    if otp_email:
-                        ok = send_otp_email(otp_email)
-                        if ok:
-                            st.session_state['otp_sent'] = True
-                            st.success(f"OTP sent to {otp_email}. Check your inbox.")
-                            st.rerun()
-                        else:
-                            st.error("Failed to send OTP. Check SMTP configuration.")
-                    else:
-                        st.error("Please enter a valid email address.")
-
-            # Step 2: Verify OTP (if sent)
-            if st.session_state.get('otp_sent', False):
-                with st.form("create_account_verify_otp", clear_on_submit=True):
-                    otp_input = st.text_input(" Enter the 6-digit OTP")
-                    verify_otp_btn = st.form_submit_button(" Verify OTP", use_container_width=True)
-                    if verify_otp_btn:
-                        pending_otp = st.session_state.get('pending_otp')
-                        expires = st.session_state.get('pending_otp_expires')
-                        try:
-                            expires_dt = datetime.fromisoformat(expires) if expires else datetime.now()
-                        except Exception:
-                            expires_dt = datetime.now()
-                        if pending_otp and otp_input and otp_input == pending_otp and expires_dt > datetime.now():
-                            st.session_state['otp_verified'] = True
-                            st.success("OTP verified. Now choose a username and password.")
-                            st.rerun()
-                        else:
-                            st.error("Invalid or expired OTP. Request a new one.")
-
-            # Step 3: Create username/password after OTP verification
-            if st.session_state.get('otp_verified', False):
-                with st.form("create_account_finalize", clear_on_submit=True):
-                    new_username = st.text_input(" Choose Username")
-                    new_password = st.text_input(" Choose Password", type="password")
-                    finalize_btn = st.form_submit_button(" Create Account", use_container_width=True)
-                    if finalize_btn:
-                        if not new_username or not new_password:
-                            st.error("Username and password are required.")
-                        else:
-                            # ensure unique username
-                            for u in st.session_state.users.values():
-                                if u.get('username') == new_username:
-                                    st.error("Username already exists. Pick another.")
-                                    break
+        if not st.session_state.get('show_create_account', False):
+            # STANDARD LOGIN VIEW
+            st.markdown('<div class="login-container"><div class="login-title">Quantum Secure Access</div>', unsafe_allow_html=True)
+            with st.form("login_form", clear_on_submit=True):
+                username_input = st.text_input(" Enter Username")
+                password_input = st.text_input(" Enter Quantum Password", type="password")
+                
+                col_l, col_r = st.columns(2)
+                with col_l:
+                    if st.form_submit_button(" Quantum Login", use_container_width=True):
+                        success, result = authenticate_user(username_input, password_input)
+                        if success:
+                            st.session_state.logged_in_user = username_input
+                            st.session_state.current_user_data = result
+                            
+                            # Get quantum_kek from database
+                            db = get_db()
+                            user = db.query(UserRegistry).filter(
+                                UserRegistry.username == username_input
+                            ).first()
+                            if user and user.quantum_kek:
+                                st.session_state.current_kek = user.quantum_kek
                             else:
-                                wallet = generate_wallet(new_username)
-                                wallet['password_hash'] = hashlib.sha256(new_password.encode()).hexdigest()
-                                user_key = "U" + secrets.token_hex(3)
-                                st.session_state.users[user_key] = wallet
-                                st.session_state.balances[wallet['public_key']] = 1000
-                                st.session_state.quantum_keys[user_key] = None
-                                st.success("Account created successfully! Please login using your username and password.")
-                                # clear create-account temporary state
-                                for k in ['show_create_account','pending_otp','pending_otp_email','pending_otp_expires','otp_sent','otp_verified']:
-                                    if k in st.session_state: del st.session_state[k]
+                                st.session_state.current_kek = None
+                            db.close()
+                            
+                            st.rerun()
+                        else:
+                            st.error(result)
+                with col_r:
+                    if st.form_submit_button(" Create Account", use_container_width=True):
+                        st.session_state['show_create_account'] = True
+                        st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+        else:
+            # CREATE ACCOUNT FLOW
+            st.markdown('<div class="modern-card"><h4>Create QuantumVerse Account</h4></div>', unsafe_allow_html=True)
+            
+            # STEP 1: OTP Verification
+            if not st.session_state.get('otp_verified', False):
+                with st.form("otp_verification_step"):
+                    st.info("Step 1: Verify your email with an OTP.")
+                    otp_email = st.text_input(" Verification Email", value=st.session_state.get('pending_otp_email',''))
+                    send_btn = st.form_submit_button("Send OTP", use_container_width=True)
+                    
+                    if send_btn and otp_email:
+                        if send_otp_email(otp_email):
+                            st.session_state['otp_sent'] = True
+                            st.rerun()
+                
+                if st.session_state.get('otp_sent', False):
+                    with st.form("verify_otp_form"):
+                        otp_val = st.text_input("Enter 6-digit OTP")
+                        if st.form_submit_button("Verify OTP", use_container_width=True):
+                            if otp_val == st.session_state.get('pending_otp'):
+                                st.session_state['otp_verified'] = True
                                 st.rerun()
+                            else:
+                                st.error("Invalid code.")
+            
+            # STEP 2: Finalize Credentials
+            else:
+                st.success("✅ Email Verified. Set your account credentials:")
+                with st.form("finalize_account_form"):
+                    new_user = st.text_input("Choose Username")
+                    new_pwd = st.text_input("Choose Password", type="password")
+                    conf_pwd = st.text_input("Confirm Password", type="password")
+                    
+                    if st.form_submit_button("Finalize Account", use_container_width=True):
+                        if new_pwd != conf_pwd:
+                            st.error("Passwords do not match.")
+                        elif new_user:
+                            success, msg = create_user(new_user, new_pwd, None)
+                            if success:
+                                st.success("Account created! 1000 QCoins granted.")
+                                for k in ['show_create_account','otp_sent','otp_verified','pending_otp']:
+                                    if k in st.session_state: del st.session_state[k]
+                                time.sleep(2)
+                                st.rerun()
+                            else:
+                                st.error(msg)
+            
+            if st.button("← Back to Login", use_container_width=True):
+                st.session_state['show_create_account'] = False
+                st.rerun()
 else:
     # ==================== TAB CONTENT ====================
     
     logged_in_user = st.session_state.logged_in_user
-    user_wallet = st.session_state.users[logged_in_user]
-    user_public_key = user_wallet["public_key"]
-    user_private_key = user_wallet["private_key"]
-    quantum_key = st.session_state.quantum_keys.get(logged_in_user)
+    user_data = st.session_state.current_user_data
+    user_public_key = user_data["public_key"]
+    user_private_key = user_data["private_key"]
+    quantum_kek = st.session_state.current_kek
 
     def get_user_stats(public_key):
         """Calculate comprehensive user statistics"""
+        blockchain = get_blockchain()
         sent, received, tx_count = 0, 0, 0
         quantum_txs = 0
         max_dimension = 0
         hardware_types = {}
         
-        for block in st.session_state.blockchain:
-            for tx in block["transactions"]:
+        for block in blockchain:
+            for tx in block.get("transactions", []):
                 if tx["sender"] == public_key:
                     sent += float(tx["amount"])
                     tx_count += 1
@@ -2121,7 +2140,7 @@ else:
         }
 
     user_stats = get_user_stats(user_public_key)
-    current_balance = st.session_state.balances.get(user_public_key, 0.0)
+    current_balance = get_user_balance(user_public_key)
 
     # Create tab navigation
     tabs = st.tabs(["Wallet", "Analytics", "Network", "Market", "Security", "Settings"])
@@ -2135,13 +2154,12 @@ else:
             st.markdown(f"""
             <div class="modern-card wallet-card">
                 <h3 style="margin-top: 0;"> Account Details</h3>
-                <p><strong>User:</strong> {user_wallet['username']}</p>
+                <p><strong>User:</strong> {logged_in_user}</p>
                 <div class="quantum-address">
                     <strong>Address:</strong><br>
                     {user_public_key[:32]}...<br>
                     {user_public_key[-32:]}
                 </div>
-                <p><strong>Created:</strong> {user_wallet['created_at'][:19]}</p>
                 <p><strong>Security:</strong> 
                     <span class="quantum-badge">{st.session_state.quantum_dimension}-D BB84</span>
                 </p>
@@ -2211,16 +2229,20 @@ else:
             col1, col2 = st.columns(2)
             
             with col1:
-                receiver_options = [k for k in st.session_state.users if k != logged_in_user]
+                # Get all other users
+                all_users = get_all_users()
+                receiver_options = [u for u in all_users if u["username"] != logged_in_user]
                 if receiver_options:
                     receiver_name = st.selectbox(
                         " Select Recipient",
                         receiver_options,
-                        format_func=lambda x: f" {st.session_state.users[x]['username']} ({x})"
+                        format_func=lambda x: f" {x['username']}"
                     )
+                    if receiver_name:
+                        receiver_pk = receiver_name["public_key"]
                 else:
                     st.error("No other users available")
-                    receiver_name = None
+                    receiver_pk = None
                 
                 max_amount = max(0.01, float(current_balance))
                 amount = st.number_input(
@@ -2257,10 +2279,8 @@ else:
 
             submitted = st.form_submit_button(" Send Quantum Transaction", use_container_width=True)
 
-            if submitted and receiver_name:
+            if submitted and receiver_pk:
                 if amount > 0 and (amount + fee) <= current_balance:
-                    receiver_pk = st.session_state.users[receiver_name]["public_key"]
-                    
                     # Show a warning for higher dimensions
                     if st.session_state.quantum_dimension > 4 and quantum_encryption:
                         st.warning(f" {st.session_state.quantum_dimension}-D quantum encryption may take longer to process")
@@ -2277,34 +2297,31 @@ else:
                     st.error(" Invalid amount or insufficient funds")
 
         # Recent Transactions
-        # ... (all previous code remains exactly the same until the transaction section)
-
-        # Recent Transactions - FIXED VERSION
         st.markdown("###  Recent Transactions")
         
+        blockchain = get_blockchain()
         recent_txs = []
-        for block in reversed(st.session_state.blockchain[-10:]):
-            for tx in block["transactions"]:
+        for block in reversed(blockchain[-10:]):
+            for tx in block.get("transactions", []):
                 if tx["sender"] == user_public_key or tx["receiver"] == user_public_key:
                     tx_copy = tx.copy()
                     tx_copy["block"] = block["index"]
                     recent_txs.append(tx_copy)
 
         if recent_txs:
-            for tx in recent_txs[:8]:  # Show only the 8 most recent transactions
-                # Determine if this was an incoming or outgoing transaction
+            for tx in recent_txs[:8]:
                 direction = "sent" if tx["sender"] == user_public_key else "received"
                 amount_color = "#ff6b6b" if direction == "sent" else "#43e97b"
                 direction_icon = "↗️" if direction == "sent" else "↘️"
                 
-                # Get the other party's username if available
+                # Get the other party's username
                 other_party_key = tx["receiver"] if direction == "sent" else tx["sender"]
                 other_party_name = "Unknown"
                 
-                # Try to find the username for this public key
-                for user_key, user_data in st.session_state.users.items():
-                    if user_data["public_key"] == other_party_key:
-                        other_party_name = user_data["username"]
+                users = get_all_users()
+                for user in users:
+                    if user["public_key"] == other_party_key:
+                        other_party_name = user["username"]
                         break
                 
                 # Format the timestamp
@@ -2314,17 +2331,14 @@ else:
                 except:
                     time_display = tx["timestamp"][:19] if len(tx["timestamp"]) > 10 else "Unknown time"
                 
-                # Create a container for the transaction
                 with st.container():
                     col1, col2 = st.columns([3, 1])
                     
                     with col1:
-                        # Transaction details
                         st.markdown(f"**{direction_icon} {direction.title()} - Block #{tx['block']}**")
                         st.markdown(f"To: {other_party_name}")
                         st.markdown(f"{time_display}")
                         
-                        # Quantum info if applicable
                         if tx.get("quantum_secured", False):
                             col_badge1, col_badge2 = st.columns(2)
                             with col_badge1:
@@ -2335,19 +2349,16 @@ else:
                                            unsafe_allow_html=True)
                     
                     with col2:
-                        # Amount display
                         amount_display = f"{'-' if direction == 'sent' else '+'}{float(tx['amount']):.2f}"
                         st.markdown(f'<div style="color: {amount_color}; font-weight: 700; font-size: 1.4rem; text-align: right;">{amount_display}</div>', 
                                    unsafe_allow_html=True)
                         st.markdown('<div style="color: rgba(255,255,255,0.6); text-align: right;">QCoins</div>', 
                                    unsafe_allow_html=True)
                         
-                        # Fee if applicable
                         if tx.get('fee', 0) > 0:
                             st.markdown(f'<div style="color: rgba(255,255,255,0.5); text-align: right;">Fee: {tx.get("fee", 0):.2f}</div>', 
                                        unsafe_allow_html=True)
                     
-                    # Divider
                     st.markdown("---")
         else:
             st.markdown("""
@@ -2358,17 +2369,18 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
-# ... (all the remaining code stays exactly the same)
-
     # ANALYTICS TAB
     with tabs[1]:
-        # Calculate quantum transaction stats first
+        blockchain = get_blockchain()
+        stats = get_network_stats()
+        
+        # Calculate quantum transaction stats
         total_quantum_tx = 0
         total_dimension = 0
         hardware_usage = {}
         
-        for block in st.session_state.blockchain:
-            for tx in block["transactions"]:
+        for block in blockchain:
+            for tx in block.get("transactions", []):
                 if tx.get("quantum_secured", False):
                     total_quantum_tx += 1
                     total_dimension += tx.get("quantum_dimension", 2)
@@ -2383,9 +2395,9 @@ else:
         col1, col2, col3, col4, col5 = st.columns(5)
         
         metrics = [
-            ("📦", "Blocks", len(st.session_state.blockchain)),
-            ("🔁", "Transactions", st.session_state.network_stats["total_transactions"]),
-            ("💰", "Volume", f"{st.session_state.network_stats['total_volume']:.1f}"),
+            ("📦", "Blocks", stats.total_blocks or 0),
+            ("🔁", "Transactions", stats.total_transactions or 0),
+            ("💰", "Volume", f"{stats.total_volume or 0.0:.1f}"),
             ("🔐", "Quantum TXs", total_quantum_tx),
             ("📊", "Avg Q-Dim", f"{avg_quantum_dim:.1f}")
         ]
@@ -2406,9 +2418,9 @@ else:
         with col1:
             # Transaction volume over time
             block_data = []
-            for block in st.session_state.blockchain[1:]:  # Skip genesis
-                block_volume = sum(float(tx["amount"]) for tx in block["transactions"] if tx["sender"] != "network")
-                quantum_txs = sum(1 for tx in block["transactions"] if tx.get("quantum_secured", False))
+            for block in blockchain[1:]:  # Skip genesis
+                block_volume = sum(float(tx["amount"]) for tx in block.get("transactions", []) if tx.get("sender") != "network")
+                quantum_txs = sum(1 for tx in block.get("transactions", []) if tx.get("quantum_secured", False))
                 block_data.append({
                     "Block": block["index"],
                     "Volume": block_volume,
@@ -2458,8 +2470,8 @@ else:
         with col2:
             # Quantum dimension distribution
             dim_counts = {}
-            for block in st.session_state.blockchain:
-                for tx in block["transactions"]:
+            for block in blockchain:
+                for tx in block.get("transactions", []):
                     if tx.get("quantum_secured", False):
                         dim = tx.get("quantum_dimension", 2)
                         dim_counts[dim] = dim_counts.get(dim, 0) + 1
@@ -2518,13 +2530,13 @@ else:
         st.markdown("###  User Performance Dashboard")
         
         user_performance = []
-        for user_key, user_data in st.session_state.users.items():
-            user_pk = user_data["public_key"]
-            user_stats_detailed = get_user_stats(user_pk)
-            balance = st.session_state.balances.get(user_pk, 0)
+        users = get_all_users()
+        for user in users:
+            user_stats_detailed = get_user_stats(user["public_key"])
+            balance = get_user_balance(user["public_key"])
             
             user_performance.append({
-                "User": user_data["username"],
+                "User": user["username"],
                 "Balance": balance,
                 "Transactions": user_stats_detailed["transaction_count"],
                 "Quantum_TXs": user_stats_detailed["quantum_txs"],
@@ -2574,72 +2586,183 @@ else:
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-        # Error rate analysis for quantum transactions
-        if total_quantum_tx > 0:
-            st.markdown("### Quantum Error Rate Analysis")
+    # NETWORK TAB
+    with tabs[2]:
+        blockchain = get_blockchain()
+        stats = get_network_stats()
+        
+        st.markdown("###  Quantum Network Explorer")
+        
+        # Network status overview
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown(f"""
+            <div class="modern-card network-card">
+                <h3 style="margin-top: 0;"> Network Information</h3>
+                <p><strong>Network:</strong> QuantumVerse</p>
+                <p><strong>Genesis:</strong> {blockchain[0]['timestamp'][:19] if blockchain else 'N/A'}</p>
+                <p><strong>Consensus:</strong> Ed25519 + SHA-256</p>
+                <p><strong>Quantum Protocol:</strong> High-Dimensional BB84</p>
+                <p><strong>Current Dimension:</strong> 
+                    <span class="dimension-badge">{st.session_state.quantum_dimension}-D</span>
+                </p>
+                <p><strong>Active Hardware:</strong> 
+                    <span class="hardware-badge">{st.session_state.last_hardware_used}</span>
+                </p>
+                <p><strong>Database:</strong> {DATABASE_URL.split('://')[0]}</p>
+                <p><strong>Total Blocks:</strong> {stats.total_blocks or 0}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown("""
+            <div class="modern-card">
+                <h3 style="margin-top: 0;"> Network Participants</h3>
+            """, unsafe_allow_html=True)
             
-            # Collect error rate data (simulated for demo purposes)
-            error_data = []
-            for block in st.session_state.blockchain:
-                for tx in block["transactions"]:
-                    if tx.get("quantum_secured", False):
-                        # Simulate error rate based on dimension and hardware
-                        base_rate = 0.05  # 5% base error rate
-                        dim_factor = 1.0 / tx.get("quantum_dimension", 2)
-                        hw_factor = 1.5 if "Simulator" in tx.get("quantum_hardware", "") else 1.0
-                        error_rate = base_rate * dim_factor * hw_factor * random.uniform(0.8, 1.2)
+            users = get_all_users()
+            for user in users:
+                bal = get_user_balance(user["public_key"])
+                active = "🟢" if user["username"] == logged_in_user else "⚪"
+                
+                st.markdown(f"""
+                <div style="display: flex; justify-content: space-between; align-items: center; 
+                     padding: 1rem; margin: 0.5rem 0; background: rgba(255,255,255,0.05); 
+                     border-radius: 12px; border: 1px solid rgba(255,255,255,0.1);">
+                    <div>
+                        <strong>{active} {user['username']}</strong><br>
+                        <small style="color: rgba(255,255,255,0.7);">{bal:.2f} QCoins</small>
+                    </div>
+                    <div style="text-align: right;">
+                        <small style="color: rgba(255,255,255,0.6);">{user['public_key'][:8]}...</small>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # Network actions
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button(" Run Quantum Security Audit", use_container_width=True):
+                with st.spinner("Auditing quantum security..."):
+                    valid_blocks = 0
+                    quantum_errors = 0
+                    
+                    for block in blockchain:
+                        block_copy = block.copy()
+                        block_copy.pop("hash", None)
+                        calculated_hash = calculate_hash(block_copy)
+                        if calculated_hash == block["hash"]:
+                            valid_blocks += 1
                         
-                        error_data.append({
-                            "block": block["index"],
-                            "timestamp": block["timestamp"],
-                            "error_rate": error_rate,
-                            "dimension": tx.get("quantum_dimension", 2),
-                            "hardware": tx.get("quantum_hardware", "Unknown")
-                        })
+                        for tx in block.get("transactions", []):
+                            if tx.get("quantum_secured", False) and not verify_signature(tx):
+                                quantum_errors += 1
+                    
+                    st.success(f"✅ Audit Complete: {valid_blocks}/{len(blockchain)} blocks valid")
+                    if quantum_errors > 0:
+                        st.error(f"❌ {quantum_errors} quantum transactions failed verification")
+                    else:
+                        st.success(" All quantum transactions verified successfully")
+        
+        with col2:
+            if st.button(" Refresh Network Data", use_container_width=True):
+                st.rerun()
+
+        # Blockchain Explorer
+        if blockchain:
+            st.markdown("###  Quantum Blockchain Explorer")
             
-            if error_data:
-                df_errors = pd.DataFrame(error_data)
+            selected_block = st.selectbox(
+                "Select Block to Explore",
+                range(len(blockchain)),
+                format_func=lambda i: f"Block #{i} ({len(blockchain[i].get('transactions', []))} transactions)",
+                index=len(blockchain) - 1
+            )
+            
+            block = blockchain[selected_block]
+            
+            # Block details
+            st.markdown(f"""
+            <div class="modern-card">
+                <h4 style="margin-top: 0;"> Block #{block['index']} 
+                    <span class="quantum-badge">Quantum Secured</span>
+                </h4>
                 
-                # Create error rate timeline
-                fig = px.line(
-                    df_errors, 
-                    x="block", 
-                    y="error_rate",
-                    title="Quantum Error Rate Over Time",
-                    template="plotly_dark",
-                    labels={"block": "Block Height", "error_rate": "Error Rate"}
-                )
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-top: 1.5rem;">
+                    <div>
+                        <p><strong> Timestamp:</strong> {block['timestamp'][:19]}</p>
+                        <p><strong> Miner:</strong> {block.get('miner', 'network')}</p>
+                        <p><strong> Transactions:</strong> {len(block.get('transactions', []))}</p>
+                        <p><strong> Quantum Dimension:</strong> 
+                            <span class="dimension-badge">{block.get('quantum_dimension', 2)}-D</span>
+                        </p>
+                    </div>
+                    <div>
+                        <p><strong> Block Hash:</strong></p>
+                        <div class="quantum-address" style="font-size: 0.8rem; margin-bottom: 1rem;">
+                            {block['hash']}
+                        </div>
+                        <p><strong> Previous Hash:</strong></p>
+                        <div class="quantum-address" style="font-size: 0.8rem;">
+                            {block['previous_hash']}
+                        </div>
+                    </div>
+                </div>
                 
-                fig.update_layout(
-                    font=dict(family="Inter"),
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    height=400
-                )
+                <p style="margin-top: 1.5rem;"><strong> Merkle Root:</strong></p>
+                <div class="quantum-address" style="font-size: 0.8rem;">
+                    {block['merkle_root']}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Block transactions
+            if block.get("transactions"):
+                st.markdown("####  Block Transactions")
                 
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Show statistics
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Average Error Rate", f"{df_errors['error_rate'].mean():.3%}")
-                with col2:
-                    st.metric("Min Error Rate", f"{df_errors['error_rate'].min():.3%}")
-                with col3:
-                    st.metric("Max Error Rate", f"{df_errors['error_rate'].max():.3%}")
+                for i, tx in enumerate(block["transactions"]):
+                    sender_name = " Network" if tx["sender"] == "network" else f" {tx['sender'][:12]}..."
+                    receiver_name = f" {tx['receiver'][:12]}..."
+                    
+                    quantum_info = ""
+                    if tx.get("quantum_secured", False):
+                        quantum_info = f"""
+                        <div style="margin-top: 0.8rem; display: flex; gap: 0.5rem;">
+                            <span class="quantum-badge">{tx.get('quantum_dimension', 2)}-D Quantum</span>
+                            <span class="hardware-badge">{tx.get('quantum_hardware', 'Simulator')}</span>
+                        </div>
+                        """
+                    
+                    st.markdown(f"""
+                    <div class="transaction-card">
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                            <div style="flex: 1;">
+                                <h5 style="margin: 0 0 1rem 0; color: #667eea;"> Transaction #{i+1}</h5>
+                                <p style="margin: 0.3rem 0;"><strong>From:</strong> {sender_name}</p>
+                                <p style="margin: 0.3rem 0;"><strong>To:</strong> {receiver_name}</p>
+                                <p style="margin: 0.3rem 0;"><strong>Type:</strong> {tx.get('type', 'transfer').title()}</p>
+                                <p style="margin: 0.3rem 0;"><strong>Time:</strong> {tx['timestamp'][:19]}</p>
+                                {quantum_info}
+                            </div>
+                            <div style="text-align: right; min-width: 100px;">
+                                <div style="font-size: 1.8rem; font-weight: 700; color: #43e97b; margin-bottom: 0.2rem;">
+                                    {float(tx['amount']):.2f}
+                                </div>
+                                <div style="color: rgba(255,255,255,0.6);">QCoins</div>
+                                {f'<div style="color: rgba(255,255,255,0.5); font-size: 0.9rem; margin-top: 0.5rem;">Fee: {tx.get("fee", 0):.2f}</div>' if tx.get("fee", 0) > 0 else ''}
+                            </div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.info("📭 No transactions in this block")
 
     # MARKET TAB
     with tabs[3]:
         st.markdown("### 📊 Quantum Market Data")
-        
-        # Initialize market data in session state if not exists
-        if "market_data" not in st.session_state:
-            st.session_state.market_data = {
-                "crypto": None,
-                "fiat": None,
-                "last_update": None,
-                "auto_refresh": True
-            }
         
         # Settings for market data
         with st.expander("⚙️ Market Settings", expanded=False):
@@ -2670,7 +2793,6 @@ else:
         
         with col3:
             if st.session_state.market_data["auto_refresh"]:
-                # Auto-refresh logic
                 if (st.session_state.market_data["last_update"] is None or 
                     (datetime.now() - st.session_state.market_data["last_update"]).seconds >= refresh_interval):
                     with st.spinner("Auto-refreshing market data..."):
@@ -2792,320 +2914,17 @@ else:
         In a future update, we'll integrate real-time financial news related to your holdings.
         """)
 
-    # NETWORK TAB
-    with tabs[2]:
-        # Calculate quantum transaction stats
-        total_quantum_tx = 0
-        total_dimension = 0
-        hardware_usage = {}
-        
-        for block in st.session_state.blockchain:
-            for tx in block["transactions"]:
-                if tx.get("quantum_secured", False):
-                    total_quantum_tx += 1
-                    total_dimension += tx.get("quantum_dimension", 2)
-                    hw = tx.get("quantum_hardware", "Aer Simulator")
-                    hardware_usage[hw] = hardware_usage.get(hw, 0) + 1
-        
-        avg_quantum_dim = total_dimension / total_quantum_tx if total_quantum_tx > 0 else 0
-        st.markdown("###  Quantum Network Explorer")
-        
-        # Network status overview
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown(f"""
-            <div class="modern-card network-card">
-                <h3 style="margin-top: 0;"> Network Information</h3>
-                <p><strong>Network:</strong> QuantumVerse</p>
-                <p><strong>Genesis:</strong> {st.session_state.blockchain[0]['timestamp'][:19] if st.session_state.blockchain else 'N/A'}</p>
-                <p><strong>Consensus:</strong> Ed25519 + SHA-256</p>
-                <p><strong>Quantum Protocol:</strong> High-Dimensional BB84</p>
-                <p><strong>Current Dimension:</strong> 
-                    <span class="dimension-badge">{st.session_state.quantum_dimension}-D</span>
-                </p>
-                <p><strong>Active Hardware:</strong> 
-                    <span class="hardware-badge">{st.session_state.last_hardware_used}</span>
-                </p>
-                <p><strong>Quantum Transactions:</strong> {total_quantum_tx}</p>
-                                    <p><strong>Average Q-Dimension:</strong> {avg_quantum_dim:.1f}</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown("""
-            <div class="modern-card">
-                <h3 style="margin-top: 0;"> Network Participants</h3>
-            """, unsafe_allow_html=True)
-            
-            for k, u in st.session_state.users.items():
-                bal = st.session_state.balances.get(u["public_key"], 0)
-                has_key = "✅" if st.session_state.quantum_keys.get(k) else "⭕"
-                active = "🟢" if k == logged_in_user else "⚪"
-                
-                st.markdown(f"""
-                <div style="display: flex; justify-content: space-between; align-items: center; 
-                     padding: 1rem; margin: 0.5rem 0; background: rgba(255,255,255,0.05); 
-                     border-radius: 12px; border: 1px solid rgba(255,255,255,0.1);">
-                    <div>
-                        <strong>{active} {u['username']} ({k})</strong><br>
-                        <small style="color: rgba(255,255,255,0.7);">{bal:.2f} QCoins</small>
-                    </div>
-                    <div style="text-align: right;">
-                        <div>{has_key}</div>
-                        <small style="color: rgba(255,255,255,0.6);">Quantum Key</small>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        # Network actions
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button(" Run Quantum Security Audit", use_container_width=True):
-                with st.spinner("Auditing quantum security..."):
-                    valid_blocks = 0
-                    quantum_errors = 0
-                    
-                    for block in st.session_state.blockchain:
-                        block_copy = block.copy()
-                        block_copy.pop("hash", None)
-                        calculated_hash = calculate_hash(block_copy)
-                        if calculated_hash == block["hash"]:
-                            valid_blocks += 1
-                        
-                        for tx in block["transactions"]:
-                            if tx.get("quantum_secured", False) and not verify_signature(tx):
-                                quantum_errors += 1
-                    
-                    st.success(f"✅ Audit Complete: {valid_blocks}/{len(st.session_state.blockchain)} blocks valid")
-                    if quantum_errors > 0:
-                        st.error(f"❌ {quantum_errors} quantum transactions failed verification")
-                    else:
-                        st.success(" All quantum transactions verified successfully")
-        
-        with col2:
-            if st.button(" Save Network State", use_container_width=True):
-                save_blockchain()
-                st.success(" Quantum ledger saved to disk!")
-
-        # Export functionality
-        st.markdown("###  Data Export & Management")
-        
-        export_data = {
-            "blockchain": st.session_state.blockchain,
-            "balances": st.session_state.balances,
-            "users": {k: {kk: vv for kk, vv in v.items() if kk not in ["private_key", "password_hash"]} 
-                     for k, v in st.session_state.users.items()},
-            "network_stats": st.session_state.network_stats,
-            "quantum_dimension": st.session_state.quantum_dimension,
-            "export_timestamp": str(datetime.now()),
-            "total_quantum_transactions": total_quantum_tx,
-            "average_quantum_dimension": avg_quantum_dim
-        }
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.download_button(
-                " Export Analytics Data",
-                json.dumps(export_data, indent=2),
-                file_name=f"quantumverse_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                mime="application/json",
-                use_container_width=True
-            )
-        
-        with col2:
-            if st.button(" Refresh Network Data", use_container_width=True):
-                for user_key, user_data in st.session_state.users.items():
-                    refresh_balance(user_data["public_key"])
-                st.success(" Network data refreshed!")
-
-        # Blockchain Explorer
-        if st.session_state.blockchain:
-            st.markdown("###  Quantum Blockchain Explorer")
-            
-            selected_block = st.selectbox(
-                "Select Block to Explore",
-                range(len(st.session_state.blockchain)),
-                format_func=lambda i: f"Block #{i} ({len(st.session_state.blockchain[i]['transactions'])} transactions)",
-                index=len(st.session_state.blockchain) - 1
-            )
-            
-            block = st.session_state.blockchain[selected_block]
-            
-            # Block details
-            st.markdown(f"""
-            <div class="modern-card">
-                <h4 style="margin-top: 0;"> Block #{block['index']} 
-                    <span class="quantum-badge">Quantum Secured</span>
-                </h4>
-                
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-top: 1.5rem;">
-                    <div>
-                        <p><strong> Timestamp:</strong> {block['timestamp'][:19]}</p>
-                        <p><strong> Miner:</strong> {block['miner']}</p>
-                        <p><strong> Transactions:</strong> {len(block['transactions'])}</p>
-                        <p><strong> Quantum Dimension:</strong> 
-                            <span class="dimension-badge">{block.get('quantum_dimension', 2)}-D</span>
-                        </p>
-                    </div>
-                    <div>
-                        <p><strong> Block Hash:</strong></p>
-                        <div class="quantum-address" style="font-size: 0.8rem; margin-bottom: 1rem;">
-                            {block['hash']}
-                        </div>
-                        <p><strong> Previous Hash:</strong></p>
-                        <div class="quantum-address" style="font-size: 0.8rem;">
-                            {block['previous_hash']}
-                        </div>
-                    </div>
-                </div>
-                
-                <p style="margin-top: 1.5rem;"><strong> Merkle Root:</strong></p>
-                <div class="quantum-address" style="font-size: 0.8rem;">
-                    {block['merkle_root']}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-            # Block transactions
-            if block["transactions"]:
-                st.markdown("####  Block Transactions")
-                
-                for i, tx in enumerate(block["transactions"]):
-                    sender_name = " Network" if tx["sender"] == "network" else f" {tx['sender'][:12]}..."
-                    receiver_name = f" {tx['receiver'][:12]}..."
-                    
-                    quantum_info = ""
-                    if tx.get("quantum_secured", False):
-                        quantum_info = f"""
-                        <div style="margin-top: 0.8rem; display: flex; gap: 0.5rem;">
-                            <span class="quantum-badge">{tx.get('quantum_dimension', 2)}-D Quantum</span>
-                            <span class="hardware-badge">{tx.get('quantum_hardware', 'Simulator')}</span>
-                        </div>
-                        """
-                    
-                    st.markdown(f"""
-                    <div class="transaction-card">
-                        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                            <div style="flex: 1;">
-                                <h5 style="margin: 0 0 1rem 0; color: #667eea;"> Transaction #{i+1}</h5>
-                                <p style="margin: 0.3rem 0;"><strong>From:</strong> {sender_name}</p>
-                                <p style="margin: 0.3rem 0;"><strong>To:</strong> {receiver_name}</p>
-                                <p style="margin: 0.3rem 0;"><strong>Type:</strong> {tx.get('type', 'transfer').title()}</p>
-                                <p style="margin: 0.3rem 0;"><strong>Time:</strong> {tx['timestamp'][:19]}</p>
-                                <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: rgba(255,255,255,0.6); margin-top: 0.5rem;">
-                                    ID: {tx.get('tx_id', 'N/A')}
-                                </div>
-                                {quantum_info}
-                            </div>
-                            <div style="text-align: right; min-width: 100px;">
-                                <div style="font-size: 1.8rem; font-weight: 700; color: #43e97b; margin-bottom: 0.2rem;">
-                                    {float(tx['amount']):.2f}
-                                </div>
-                                <div style="color: rgba(255,255,255,0.6);">QCoins</div>
-                                {f'<div style="color: rgba(255,255,255,0.5); font-size: 0.9rem; margin-top: 0.5rem;">Fee: {tx.get("fee", 0):.2f}</div>' if tx.get("fee", 0) > 0 else ''}
-                            </div>
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.info("📭 No transactions in this block")
-
-        # Advanced transaction search
-        st.markdown("###  Advanced Transaction Search")
-        
-        with st.expander(" Search Filters", expanded=False):
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                filter_sender = st.text_input(" Sender Address", "")
-                filter_amount_min = st.number_input(" Min Amount", min_value=0.0, value=0.0)
-            
-            with col2:
-                filter_receiver = st.text_input(" Receiver Address", "")
-                filter_amount_max = st.number_input(" Max Amount", min_value=0.0, value=10000.0)
-            
-            with col3:
-                filter_type = st.selectbox(" Transaction Type", ["all", "transfer", "payment", "gift", "loan", "reward"])
-                quantum_only = st.checkbox(" Quantum Only", value=False)
-
-        # Collect and filter transactions
-        all_transactions = []
-        for block in st.session_state.blockchain:
-            for tx in block["transactions"]:
-                tx_with_block = tx.copy()
-                tx_with_block["block_height"] = block["index"]
-                tx_with_block["block_time"] = block["timestamp"]
-                all_transactions.append(tx_with_block)
-
-        # Apply filters
-        filtered_txs = all_transactions
-        if filter_sender:
-            filtered_txs = [tx for tx in filtered_txs if filter_sender.lower() in tx["sender"].lower()]
-        if filter_receiver:
-            filtered_txs = [tx for tx in filtered_txs if filter_receiver.lower() in tx["receiver"].lower()]
-        if filter_amount_min > 0:
-            filtered_txs = [tx for tx in filtered_txs if float(tx["amount"]) >= filter_amount_min]
-        if filter_amount_max < 10000:
-            filtered_txs = [tx for tx in filtered_txs if float(tx["amount"]) <= filter_amount_max]
-        if filter_type != "all":
-            filtered_txs = [tx for tx in filtered_txs if tx.get("type", "transfer") == filter_type]
-        if quantum_only:
-            filtered_txs = [tx for tx in filtered_txs if tx.get("quantum_secured", False)]
-
-        st.markdown(f"** Found {len(filtered_txs)} transactions**")
-        
-        # Display filtered results
-        for tx in filtered_txs[-15:]:  # Show most recent 15
-            direction = "outgoing" if tx["sender"] == user_public_key else "incoming"
-            direction_icon = "↗️" if direction == "outgoing" else "↘️"
-            amount_color = "#ff6b6b" if direction == "outgoing" else "#43e97b"
-            
-            quantum_info = ""
-            if tx.get("quantum_secured", False):
-                quantum_info = f"""
-                <div style="margin-top: 0.8rem; display: flex; gap: 0.5rem;">
-                    <span class="quantum-badge">{tx.get('quantum_dimension', 2)}-D</span>
-                    <span class="hardware-badge">{tx.get('quantum_hardware', 'Simulator')}</span>
-                </div>
-                """
-            else:
-                quantum_info = '<div style="margin-top: 0.8rem;"><span style="color: #feca57; font-weight: 600;">⚠️ Classical Transaction</span></div>'
-            
-            st.markdown(f"""
-            <div class="transaction-card">
-                <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                    <div style="flex: 1;">
-                        <div style="font-weight: 600; font-size: 1.1rem; margin-bottom: 0.5rem;">
-                            {direction_icon} Block #{tx['block_height']} • {direction.upper()}
-                        </div>
-                        <div style="color: rgba(255,255,255,0.7; margin-bottom: 0.8rem;">
-                            From: {tx['sender'][:12]}...{tx['sender'][-6:]}
-                        </div>
-                        <div style="color: rgba(255,255,255,0.7; margin-bottom: 0.8rem;">
-                            To: {tx['receiver'][:12]}...{tx['receiver'][-6:]}
-                        </div>
-                        <div style="font-size: 0.9rem; color: rgba(255,255,255,0.6); margin-bottom: 0.8rem;">
-                            {tx['timestamp'][:19]} • {tx.get('type', 'transfer').title()}
-                        </div>
-                        {quantum_info}
-                    </div>
-                    <div style="text-align: right; min-width: 100px;">
-                        <div style="color: {amount_color}; font-weight: 700; font-size: 1.4rem; margin-bottom: 0.2rem;">
-                            {float(tx['amount']):.2f}
-                        </div>
-                        <div style="color: rgba(255,255,255,0.6); font-size: 0.9rem;">
-                            QCoins
-                        </div>
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
     # SECURITY TAB
     with tabs[4]:
+        blockchain = get_blockchain()
+        
+        # Calculate quantum transaction stats
+        total_quantum_tx = 0
+        for block in blockchain:
+            for tx in block.get("transactions", []):
+                if tx.get("quantum_secured", False):
+                    total_quantum_tx += 1
+        
         st.markdown("### Quantum Security Center")
         
         # Security overview
@@ -3229,15 +3048,15 @@ else:
         # Quantum key management
         st.markdown("###  Quantum Key Management")
         
-        if quantum_key:
+        if quantum_kek:
             col1, col2 = st.columns([3, 1])
             
             with col1:
                 st.markdown(f"""
                 <div class="quantum-address" style="font-size: 0.9rem;">
-                    <strong>Current Quantum Key:</strong><br>
-                    {quantum_key[:64]}...<br>
-                    {quantum_key[-64:]}
+                    <strong>Current Quantum KEK:</strong><br>
+                    {quantum_kek[:64]}...<br>
+                    {quantum_kek[-64:]}
                 </div>
                 """, unsafe_allow_html=True)
             
@@ -3246,11 +3065,22 @@ else:
                     with st.spinner("Generating new quantum key..."):
                         new_key = one_time_circuit_high_dim_bb84(256, st.session_state.quantum_dimension)
                         if new_key:
-                            st.session_state.quantum_keys[logged_in_user] = new_key
-                            st.success(" Quantum key refreshed!")
-                            st.rerun()
+                            # Update user's KEK in database
+                            db = get_db()
+                            user = db.query(UserRegistry).filter(
+                                UserRegistry.username == logged_in_user
+                            ).first()
+                            if user:
+                                user.quantum_kek = new_key
+                                db.commit()
+                                st.session_state.current_kek = new_key
+                                st.success(" Quantum key refreshed!")
+                                st.rerun()
+                            else:
+                                st.error("User not found in database")
+                            db.close()
                         else:
-                            st.error(" Failed to generate new quantum key")
+                            st.error("Failed to generate new quantum key")
         else:
             st.info(" No quantum key available. Generate one by making a quantum transaction.")
         
@@ -3261,21 +3091,14 @@ else:
         audit_events = [
             {
                 "timestamp": (datetime.now() - timedelta(minutes=5)).strftime("%H:%M:%S"),
-                "event": "Quantum transaction completed",
+                "event": "Quantum authentication completed",
                 "status": "✅ Success",
                 "dimension": st.session_state.quantum_dimension,
                 "hardware": st.session_state.last_hardware_used
             },
             {
                 "timestamp": (datetime.now() - timedelta(hours=1)).strftime("%H:%M:%S"),
-                "event": "Quantum key generation",
-                "status": "✅ Success",
-                "dimension": st.session_state.quantum_dimension,
-                "hardware": st.session_state.last_hardware_used
-            },
-            {
-                "timestamp": (datetime.now() - timedelta(hours=3)).strftime("%H:%M:%S"),
-                "event": "Security settings updated",
+                "event": "Database connection established",
                 "status": "✅ Success",
                 "dimension": "N/A",
                 "hardware": "N/A"
@@ -3301,34 +3124,6 @@ else:
                 </div>
             </div>
             """, unsafe_allow_html=True)
-
-        # Security recommendations
-        st.markdown("###  Security Recommendations")
-        
-        recommendations = []
-        
-        if user_stats["quantum_txs"] < 5:
-            recommendations.append("Make more quantum transactions to improve security score")
-        
-        if st.session_state.quantum_dimension < 8:
-            recommendations.append("Consider increasing quantum dimension to 8-D or higher")
-        
-        if "IBM" not in st.session_state.last_hardware_used:
-            recommendations.append("Try using real quantum hardware for enhanced security")
-        
-        if not recommendations:
-            st.success("✅ Your security configuration is optimal!")
-        else:
-            for rec in recommendations:
-                st.markdown(f"""
-                <div style="background: rgba(254, 202, 87, 0.1); padding: 1rem; border-radius: 12px; 
-                     margin: 0.5rem 0; border-left: 4px solid #feca57;">
-                    <div style="display: flex; align-items: center;">
-                        <span style="font-size: 1.2rem; margin-right: 0.5rem;">⚠️</span>
-                        <span>{rec}</span>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
 
     # SETTINGS TAB
     with tabs[5]:
@@ -3486,133 +3281,56 @@ else:
             
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # Data management
-        st.markdown("####  Data Management")
+        # Database management
+        st.markdown("####  Database Management")
         
         col1, col2 = st.columns(2)
         
         with col1:
             st.markdown("""
             <div class="modern-card">
-                <h4 style="margin-top: 0;"> Backup & Restore</h4>
+                <h4 style="margin-top: 0;"> Database Information</h4>
             """, unsafe_allow_html=True)
             
-            if st.button(" Backup Blockchain Data", use_container_width=True):
-                save_blockchain()
-                st.success("Blockchain data backed up successfully!")
+            st.info(f"**Database URL:** {DATABASE_URL}")
             
-            uploaded_file = st.file_uploader(
-                "Restore from Backup",
-                type=["json"],
-                help="Upload a previously exported blockchain backup file"
-            )
+            stats = get_network_stats()
+            st.metric("Total Blocks", stats.total_blocks or 0)
+            st.metric("Total Transactions", stats.total_transactions or 0)
             
-            if uploaded_file is not None:
-                try:
-                    data = json.load(uploaded_file)
-                    if st.button(" Restore Backup", use_container_width=True):
-                        st.session_state.blockchain = data.get("blockchain", [])
-                        st.session_state.balances = data.get("balances", {})
-                        st.session_state.network_stats = data.get("network_stats", {"total_transactions": 0, "total_volume": 0})
-                        st.success("Backup restored successfully!")
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"Error reading backup file: {e}")
+            users = get_all_users()
+            st.metric("Active Users", len(users))
             
-            st.markdown("</div>", unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown("""
-            <div class="modern-card">
-                <h4 style="margin-top: 0;"> Data Privacy</h4>
-            """, unsafe_allow_html=True)
-            
-            data_collection = st.checkbox(
-                "Allow Anonymous Usage Data",
-                value=False,
-                help="Help improve QuantumVerse by sharing anonymous usage statistics"
-            )
-            
-            crash_reports = st.checkbox(
-                "Send Crash Reports",
-                value=True,
-                help="Automatically send error reports to help fix issues"
-            )
-            
-            analytics_tracking = st.checkbox(
-                "Enable Analytics",
-                value=True,
-                help="Track application usage for improvement purposes"
-            )
-            
-            if st.button(" Clear Local Data", use_container_width=True):
-                # This would clear all local data in a real application
-                st.warning("This will remove all local data and reset the application")
-                if st.button(" Confirm Clear Data", use_container_width=True):
-                    for key in list(st.session_state.keys()):
-                        del st.session_state[key]
-                    initialize_session_state()
-                    st.success("Local data cleared!")
-                    st.rerun()
+            if st.button(" Backup Database", use_container_width=True):
+                # Export data as JSON
+                export_data = {
+                    "blockchain": blockchain,
+                    "users": users,
+                    "network_stats": {
+                        "total_transactions": stats.total_transactions or 0,
+                        "total_volume": stats.total_volume or 0.0,
+                        "total_blocks": stats.total_blocks or 0,
+                        "last_update": stats.last_update.isoformat() if stats.last_update else None
+                    },
+                    "export_timestamp": datetime.now().isoformat()
+                }
+                
+                st.download_button(
+                    " Download Backup",
+                    json.dumps(export_data, indent=2),
+                    file_name=f"quantumverse_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
             
             st.markdown("</div>", unsafe_allow_html=True)
-
-        # System information
-        st.markdown("####  System Information")
-        
-        system_info = {
-            "Python Version": sys.version.split()[0],
-            "Streamlit Version": st.__version__,
-            "Qiskit Version": "Available" if 'qiskit' in sys.modules else "Not Available",
-            "Quantum Backend": st.session_state.last_hardware_used,
-            "Blockchain Size": f"{len(st.session_state.blockchain)} blocks",
-            "Total Transactions": st.session_state.network_stats["total_transactions"],
-            "Users": len(st.session_state.users),
-            "Quantum Keys": sum(1 for k in st.session_state.quantum_keys.values() if k is not None)
-        }
-        
-        info_cols = st.columns(2)
-        for i, (key, value) in enumerate(system_info.items()):
-            with info_cols[i % 2]:
-                st.markdown(f"""
-                <div style="background: rgba(255,255,255,0.05); padding: 1rem; border-radius: 12px; 
-                     margin: 0.5rem 0; border: 1px solid rgba(255,255,255,0.1);">
-                    <div style="font-weight: 600; margin-bottom: 0.5rem;">{key}</div>
-                    <div style="color: rgba(255,255,255,0.8);">{value}</div>
-                </div>
-                """, unsafe_allow_html=True)
-
-        # Application actions
-        st.markdown("####  Application Actions")
-        
-        action_cols = st.columns(3)
-        
-        with action_cols[0]:
-            if st.button(" Check for Updates", use_container_width=True):
-                st.info("Update check functionality would be implemented here")
-        
-        with action_cols[1]:
-            if st.button(" Clear Cache", use_container_width=True):
-                st.success("Cache cleared successfully!")
-        
-        with action_cols[2]:
-            if st.button(" Report Issue", use_container_width=True):
-                st.info("Issue reporting would open a dialog here")
-
-        # About section
-        st.markdown("---")
-        st.markdown("""
-        <div style="text-align: center; color: rgba(255,255,255,0.7);">
-            <h3>QuantumVerse</h3>
-            <p>Next-Generation Quantum Blockchain Platform</p>
-            <p>Version 1.0.0 • Built with Streamlit and Qiskit</p>
-            <p>© 2024 QuantumVerse Team. All rights reserved.</p>
-        </div>
-        """, unsafe_allow_html=True)
 
     # Logout button at the bottom
     if st.button(" Logout", use_container_width=True):
         del st.session_state.logged_in_user
+        del st.session_state.current_user_data
+        del st.session_state.current_kek
+        del st.session_state.current_dek
         st.rerun()
 
 # Add a custom footer
@@ -3620,7 +3338,7 @@ st.markdown("""
 <div style="text-align: center; margin-top: 3rem; padding: 2rem; color: rgba(255,255,255,0.5);">
     <div>QuantumVerse - High-Dimensional Quantum Blockchain</div>
     <div style="margin-top: 0.5rem; font-size: 0.9rem;">
-        Built with Streamlit • Qiskit • Ed25519 • Advanced Cryptography
+        Built with Streamlit • Qiskit • SQLAlchemy • Ed25519 • Advanced Cryptography
     </div>
 </div>
 """, unsafe_allow_html=True)
