@@ -50,6 +50,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, F
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.sql import func
+from sqlalchemy.exc import IntegrityError  # Added for handling database integrity errors
 
 # Market data imports
 import requests
@@ -875,6 +876,32 @@ def run_high_dimensional_bb84_protocol(key_length=256, dimension=4, backend=None
     time.sleep(0.5)
     progress_container.empty()
     
+    # Add import for Bell-MICV verifier
+    from quantum.bell_micv_verifier import bell_micv_verify_channel
+
+    # After key generation, add Bell-MICV verification
+    status_text.text(" Verifying quantum channel integrity with Bell-MICV...")
+    bell_result = bell_micv_verify_channel(shots=1024, backend=backend)
+    
+    if not bell_result["violation"]:
+        st.error(f"Quantum channel rejected: Bell-MICV verification failed (CHSH={bell_result['chsh_value']:.3f}, Trust={bell_result['trust_level']})")
+        return None
+    
+    # If verification passes, proceed with key finalization
+    # Add Bell metadata to auth_key or wherever quantum metadata is stored
+    # Assuming auth_key is part of the return or session state; adjust as needed
+    # For example, if returning a dict, include it; here, we log it
+    st.info(f"Bell-MICV verified: CHSH={bell_result['chsh_value']:.3f}, Trust={bell_result['trust_level']}")
+    
+    # In transaction/block metadata, add:
+    # "quantum_protocol": "BB84+Bell-MICV",
+    # "bell_chsh_value": bell_result["chsh_value"],
+    # "bell_trust_level": bell_result["trust_level"]
+    # This should be done in create_transaction or save_block_to_db; example placeholder:
+    # transaction["quantum_protocol"] = "BB84+Bell-MICV"
+    # transaction["bell_chsh_value"] = bell_result["chsh_value"]
+    # transaction["bell_trust_level"] = bell_result["trust_level"]
+    
     return binascii.hexlify(final_key).decode()
 
 def one_time_circuit_high_dim_bb84(key_length=256, dimension=4):
@@ -999,7 +1026,7 @@ def verify_signature(transaction) -> bool:
 
         tx_data_to_verify = {k: v for k, v in transaction.items() if k != "signature"}
         tx_string = json.dumps(tx_data_to_verify, sort_keys=True).encode()
-        tx_hash = hashlib.sha256(tx_string).hexdigest().encode()
+        tx_hash = hashlib.sha256(tx_string).hexdigest().encode();
 
         # will raise an exception if verification fails
         sender_vk.verify(signature, tx_hash)
@@ -1055,12 +1082,24 @@ def save_block_to_db(block_data):
         quantum_dimension=block_data.get("quantum_dimension", 4)
     )
     
-    db.add(block)
-    db.commit()
-    db.close()
-    
-    update_network_stats(blocks_added=1)
-    return True
+    try:
+        db.add(block)
+        db.commit()
+        db.close()
+        
+        update_network_stats(blocks_added=1)
+        return True
+    except IntegrityError:
+        # Handle race condition where another transaction created a block with the same index
+        db.rollback()
+        db.close()
+        return False
+    except Exception as e:
+        # Catch any other database errors
+        db.rollback()
+        db.close()
+        st.error(f"Unexpected database error: {e}")
+        return False
 
 def get_blockchain():
     """Get all blocks from database"""
@@ -1840,7 +1879,7 @@ st.markdown("""
     
     /* Transaction confirmation animation */
     @keyframes quantum-payment-confirmed {
-        0% { 
+                0% { 
             transform: scale(1);
             opacity: 0;
         }
@@ -2128,7 +2167,7 @@ else:
                         max_dimension = max(max_dimension, tx.get("quantum_dimension", 2))
                         hw = tx.get("quantum_hardware", "Aer Simulator")
                         hardware_types[hw] = hardware_types.get(hw, 0) + 1
-                        
+            
         return {
             "total_sent": sent,
             "total_received": received,
@@ -2544,9 +2583,9 @@ else:
             })
         
         if user_performance:
-            df_users = pd.DataFrame(user_performance)
+            df_users = pd.DataFrame(user_performance);
             
-            col1, col2 = st.columns(2)
+            col1, col2 = st.columns(2);
             
             with col1:
                 fig = px.bar(
@@ -2564,7 +2603,7 @@ else:
                     paper_bgcolor="rgba(0,0,0,0)",
                     height=350
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True);
             
             with col2:
                 fig = px.scatter(
@@ -2598,7 +2637,7 @@ else:
         
         with col1:
             st.markdown(f"""
-            <div class="modern-card network-card">
+            <div class="modern-card">
                 <h3 style="margin-top: 0;"> Network Information</h3>
                 <p><strong>Network:</strong> QuantumVerse</p>
                 <p><strong>Genesis:</strong> {blockchain[0]['timestamp'][:19] if blockchain else 'N/A'}</p>
@@ -3325,20 +3364,36 @@ else:
             
             st.markdown("</div>", unsafe_allow_html=True)
 
-    # Logout button at the bottom
-    if st.button(" Logout", use_container_width=True):
-        del st.session_state.logged_in_user
-        del st.session_state.current_user_data
-        del st.session_state.current_kek
-        del st.session_state.current_dek
-        st.rerun()
-
-# Add a custom footer
-st.markdown("""
-<div style="text-align: center; margin-top: 3rem; padding: 2rem; color: rgba(255,255,255,0.5);">
-    <div>QuantumVerse - High-Dimensional Quantum Blockchain</div>
-    <div style="margin-top: 0.5rem; font-size: 0.9rem;">
-        Built with Streamlit • Qiskit • SQLAlchemy • Ed25519 • Advanced Cryptography
-    </div>
-</div>
-""", unsafe_allow_html=True)
+        with col2:
+            st.markdown("""
+            <div class="modern-card">
+                <h4 style="margin-top: 0;"> Database Actions</h4>
+            """, unsafe_allow_html=True)
+            
+            if st.button(" Compact Database", use_container_width=True):
+                with st.spinner("Compacting database..."):
+                    try:
+                        # For SQLite, perform a VACUUM to compact the database
+                        if "sqlite" in DATABASE_URL:
+                            with engine.connect() as conn:
+                                conn.execute("VACUUM")
+                            st.success("Database compacted successfully!")
+                        else:
+                            st.warning("Database compact operation is only available for SQLite")
+                    except Exception as e:
+                        st.error(f"Error compacting database: {e}")
+            
+            if st.button(" Analyze Database", use_container_width=True):
+                with st.spinner("Analyzing database..."):
+                    try:
+                        # For SQLite, perform an ANALYZE to update statistics
+                        if "sqlite" in DATABASE_URL:
+                            with engine.connect() as conn:
+                                conn.execute("ANALYZE")
+                            st.success("Database analyzed successfully!")
+                        else:
+                            st.warning("Database analyze operation is only available for SQLite")
+                    except Exception as e:
+                        st.error(f"Error analyzing database: {e}")
+            
+            st.markdown("</div>", unsafe_allow_html=True)
