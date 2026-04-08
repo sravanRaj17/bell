@@ -10,3 +10,6 @@ numpy
 qrcode
 sqlalchemy
 pysqlite3
+scipy
+matplotlib
+python-dotenv
